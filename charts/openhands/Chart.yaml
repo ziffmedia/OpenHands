@@ -1,6 +1,6 @@
 apiVersion: v2
 name: openhands
-description: A Helm chart for using the kubernetes runtime with OpenHands.
+description: A Helm chart for deploying OpenHands with Kubernetes runtime support.
 
 # A chart can be either an 'application' or a 'library' chart.
 #
@@ -15,10 +15,30 @@ type: application
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
-version: 0.3.4
+version: 0.4.0
 
 # This is the version number of the application being deployed. This version number should be
 # incremented each time you make changes to the application. Versions are not expected to
 # follow Semantic Versioning. They should reflect the version the application is using.
 # It is recommended to use it with quotes.
 appVersion: "0.40.0"
+
+# Keywords for the chart
+keywords:
+  - ai
+  - automation
+  - development
+  - kubernetes
+  - openhands
+
+# Home page URL
+home: https://github.com/All-Hands-AI/OpenHands
+
+# Source code URLs
+sources:
+  - https://github.com/All-Hands-AI/OpenHands
+
+# Maintainers
+maintainers:
+  - name: OpenHands Team
+    url: https://github.com/All-Hands-AI/OpenHands

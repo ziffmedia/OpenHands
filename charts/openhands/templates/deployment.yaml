@@ -41,10 +41,8 @@ spec:
             - name: "RUNTIME"
               value: {{ .Values.config.runtime | quote }}
             {{- end }}
-            {{- if .Values.config.sandboxRuntimeContainerImage }}
             - name: "SANDBOX_RUNTIME_CONTAINER_IMAGE"
-              value: {{ .Values.config.sandboxRuntimeContainerImage | quote }}
-            {{- end }}
+              value: {{ .Values.config.sandboxRuntimeContainerImage | default (printf "%s:%s" .Values.runtimeImage.repository .Values.runtimeImage.tag) | quote }}
             {{- with .Values.kubernetesConfig }}
             {{- if .namespace }}
             - name: SANDBOX_KUBERNETES_NAMESPACE

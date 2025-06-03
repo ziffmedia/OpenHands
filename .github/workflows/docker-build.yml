@@ -1,0 +1,187 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: true
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.head_ref && github.ref) || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-app:
+    name: Build OpenHands App Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./containers/app/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            OPENHANDS_BUILD_VERSION=${{ github.ref_name }}
+
+  build-runtime:
+    name: Build Runtime Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        base_image:
+          - name: nikolaik
+            image: nikolaik/python-nodejs:python3.12-nodejs22
+          - name: ubuntu
+            image: ubuntu:24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install Python dependencies
+        run: |
+          poetry install --only=main --no-root
+
+      - name: Generate runtime build context
+        run: |
+          mkdir -p containers/runtime
+          poetry run python3 openhands/runtime/utils/runtime_build.py \
+            --base_image ${{ matrix.base_image.image }} \
+            --build_folder containers/runtime \
+            --force_rebuild
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/runtime
+          tags: |
+            type=ref,event=branch,suffix=-${{ matrix.base_image.name }}
+            type=ref,event=pr,suffix=-${{ matrix.base_image.name }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.base_image.name }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.base_image.name }}
+            type=semver,pattern={{major}},suffix=-${{ matrix.base_image.name }}
+            type=raw,value=latest-${{ matrix.base_image.name }},enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-,suffix=-${{ matrix.base_image.name }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./containers/runtime
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=runtime-${{ matrix.base_image.name }}
+          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.base_image.name }}
+
+  test-images:
+    name: Test Built Images
+    runs-on: ubuntu-latest
+    needs: [build-app, build-runtime]
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        base_image: [nikolaik, ubuntu]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Test app image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands:${{ github.sha }} python -c "import openhands; print('OpenHands app image works!')"
+
+      - name: Test runtime image
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/runtime:${{ github.sha }}-${{ matrix.base_image }} python -c "print('Runtime image works!')"

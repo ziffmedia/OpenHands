@@ -3,10 +3,19 @@
 
 image:
   # -- The container image to use for the deployment.
-  repository: docker.all-hands.dev/all-hands-ai/openhands
+  repository: ghcr.io/all-hands-ai/openhands
   # -- The tag to use for the deployment.
   tag: "0.40.0"
   # -- The image pull policy to use for the deployment.
+  pullPolicy: IfNotPresent
+
+# Runtime image configuration
+runtimeImage:
+  # -- The container image repository to use for runtime pods.
+  repository: ghcr.io/all-hands-ai/runtime
+  # -- The tag to use for runtime pods.
+  tag: "0.40.0-nikolaik"
+  # -- The image pull policy to use for runtime pods.
   pullPolicy: IfNotPresent
 
 # -- Optional image pull secrets for private registries.
@@ -62,8 +71,8 @@ kubernetesConfig:
 config:
   # -- Set the RUNTIME env var to use kubernetes runtime.
   runtime: "kubernetes"
-  # -- Image to use for runtime pods. Required.
-  sandboxRuntimeContainerImage: "ghcr.io/all-hands-ai/runtime:oh_v0.40.0_image_nikolaik_s_python-nodejs_tag_python3.12-nodejs22"
+  # -- Image to use for runtime pods. If not set, will use runtimeImage.repository:runtimeImage.tag
+  sandboxRuntimeContainerImage: ""
 
 # -- Additional command line arguments for the OpenHands controller/server.
 args: []

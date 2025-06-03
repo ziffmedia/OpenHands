@@ -1,8 +1,48 @@
 # openhands
 
-![Version: 0.3.4](https://img.shields.io/badge/Version-0.3.4-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.40.0](https://img.shields.io/badge/AppVersion-0.40.0-informational?style=flat-square)
+![Version: 0.4.0](https://img.shields.io/badge/Version-0.4.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.40.0](https://img.shields.io/badge/AppVersion-0.40.0-informational?style=flat-square)
 
-A Helm chart for using the kubernetes runtime with OpenHands.
+A Helm chart for deploying OpenHands with Kubernetes runtime support.
+
+## Installation
+
+### From OCI Registry (Recommended)
+
+```bash
+helm install openhands oci://ghcr.io/all-hands-ai/openhands --version 0.4.0
+```
+
+### From Source
+
+```bash
+git clone https://github.com/All-Hands-AI/OpenHands.git
+cd OpenHands/charts
+helm install openhands ./openhands
+```
+
+## Configuration
+
+### Runtime Image Override
+
+You can override the runtime image used by OpenHands in several ways:
+
+1. **Using runtimeImage values (recommended):**
+```yaml
+runtimeImage:
+  repository: ghcr.io/all-hands-ai/runtime
+  tag: "0.40.0-ubuntu"  # or "0.40.0-nikolaik"
+```
+
+2. **Using direct configuration:**
+```yaml
+config:
+  sandboxRuntimeContainerImage: "ghcr.io/all-hands-ai/runtime:0.40.0-ubuntu"
+```
+
+### Available Runtime Images
+
+- `ghcr.io/all-hands-ai/runtime:0.40.0-nikolaik` - Based on nikolaik/python-nodejs (default)
+- `ghcr.io/all-hands-ai/runtime:0.40.0-ubuntu` - Based on Ubuntu 24.04
 
 ## Values
 
@@ -11,11 +51,11 @@ A Helm chart for using the kubernetes runtime with OpenHands.
 | affinity | object | `{}` |  |
 | args | list | `[]` | Additional command line arguments for the OpenHands controller/server. |
 | config.runtime | string | `"kubernetes"` | Set the RUNTIME env var to use kubernetes runtime. |
-| config.sandboxRuntimeContainerImage | string | `"ghcr.io/all-hands-ai/runtime:oh_v0.40.0_image_nikolaik_s_python-nodejs_tag_python3.12-nodejs22"` | Image to use for runtime pods. Required. |
+| config.sandboxRuntimeContainerImage | string | `""` | Image to use for runtime pods. If not set, will use runtimeImage.repository:runtimeImage.tag |
 | env | list | `[]` | Additional environment variables for the deployment. |
 | fullnameOverride | string | `""` |  |
 | image.pullPolicy | string | `"IfNotPresent"` | The image pull policy to use for the deployment. |
-| image.repository | string | `"docker.all-hands.dev/all-hands-ai/openhands"` | The container image to use for the deployment. |
+| image.repository | string | `"ghcr.io/all-hands-ai/openhands"` | The container image to use for the deployment. |
 | image.tag | string | `"0.40.0"` | The tag to use for the deployment. |
 | imagePullSecrets | list | `[]` | Optional image pull secrets for private registries. |
 | ingress.annotations | object | `{}` |  |
@@ -48,6 +88,9 @@ A Helm chart for using the kubernetes runtime with OpenHands.
 | readinessProbe.httpGet.path | string | `"/"` |  |
 | readinessProbe.httpGet.port | string | `"http"` |  |
 | resources | object | `{}` |  |
+| runtimeImage.pullPolicy | string | `"IfNotPresent"` | The image pull policy to use for runtime pods. |
+| runtimeImage.repository | string | `"ghcr.io/all-hands-ai/runtime"` | The container image repository to use for runtime pods. |
+| runtimeImage.tag | string | `"0.40.0-nikolaik"` | The tag to use for runtime pods. |
 | securityContext | object | `{}` |  |
 | service.port | int | `3000` |  |
 | service.type | string | `"ClusterIP"` |  |
