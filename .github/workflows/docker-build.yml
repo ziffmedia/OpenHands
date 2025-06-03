@@ -65,7 +65,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-
+            type=sha
 
       - name: Build and push
         id: build
@@ -149,7 +149,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.base_image.name }}
             type=semver,pattern={{major}},suffix=-${{ matrix.base_image.name }}
             type=raw,value=latest-${{ matrix.base_image.name }},enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-,suffix=-${{ matrix.base_image.name }}
+            type=sha,suffix=-${{ matrix.base_image.name }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
