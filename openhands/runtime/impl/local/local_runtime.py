@@ -390,14 +390,11 @@ class LocalRuntime(ActionExecutionClient):
 
     @property
     def runtime_url(self) -> str:
-
         runtime_url = os.getenv('RUNTIME_URL')
         if runtime_url:
             return runtime_url
 
-
-
-        #TODO: This could be removed if we had a straightforward variable containing the RUNTIME_URL in the K8 env.
+        # TODO: This could be removed if we had a straightforward variable containing the RUNTIME_URL in the K8 env.
         runtime_url_pattern = os.getenv('RUNTIME_URL_PATTERN')
         hostname = os.getenv('HOSTNAME')
         if runtime_url_pattern and hostname:
