@@ -44,6 +44,39 @@ config:
 - `ghcr.io/all-hands-ai/runtime:0.40.0-nikolaik` - Based on nikolaik/python-nodejs (default)
 - `ghcr.io/all-hands-ai/runtime:0.40.0-ubuntu` - Based on Ubuntu 24.04
 
+## Installation
+
+### From OCI Registry (Recommended)
+
+```bash
+# Install the chart directly from GHCR
+helm install my-openhands oci://ghcr.io/all-hands-ai/charts/openhands --version 0.3.4
+
+# Or install with custom values
+helm install my-openhands oci://ghcr.io/all-hands-ai/charts/openhands --version 0.3.4 -f values.yaml
+```
+
+### From Source
+
+```bash
+# Clone the repository
+git clone https://github.com/All-Hands-AI/OpenHands.git
+cd OpenHands
+
+# Install the chart from source
+helm install my-openhands ./charts/openhands
+```
+
+## Upgrading
+
+```bash
+# Update to the latest version
+helm upgrade my-openhands oci://ghcr.io/all-hands-ai/charts/openhands
+
+# Or upgrade to a specific version
+helm upgrade my-openhands oci://ghcr.io/all-hands-ai/charts/openhands --version 0.3.4
+```
+
 ## Values
 
 | Key | Type | Default | Description |

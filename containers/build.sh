@@ -8,16 +8,18 @@ push=0
 load=0
 tag_suffix=""
 dry_run=0
+platform=""
 
 # Function to display usage information
 usage() {
-    echo "Usage: $0 -i <image_name> [-o <org_name>] [--push] [--load] [-t <tag_suffix>] [--dry]"
+    echo "Usage: $0 -i <image_name> [-o <org_name>] [--push] [--load] [-t <tag_suffix>] [--dry] [--platform <platform>]"
     echo "  -i: Image name (required)"
     echo "  -o: Organization name"
     echo "  --push: Push the image"
     echo "  --load: Load the image"
     echo "  -t: Tag suffix"
     echo "  --dry: Don't build, only create build-args.json"
+    echo "  --platform: Build platform (e.g., linux/amd64, linux/arm64)"
     exit 1
 }
 
@@ -30,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         --load) load=1; shift ;;
         -t) tag_suffix="$2"; shift 2 ;;
         --dry) dry_run=1; shift ;;
+        --platform) platform="$2"; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -97,6 +100,7 @@ fi
 
 source "$dir/config.sh"
 
+# Override DOCKER_ORG if provided via command line
 if [[ -n "$org_name" ]]; then
   DOCKER_ORG="$org_name"
 fi
@@ -134,19 +138,22 @@ fi
 
 echo "Args: $args"
 
-# Modify the platform selection based on --load flag
-if [[ $load -eq 1 ]]; then
+# Modify the platform selection based on --load flag and --platform option
+if [[ -n "$platform" ]]; then
+  # Use specified platform
+  build_platform="$platform"
+elif [[ $load -eq 1 ]]; then
   # When loading, build only for the current platform
-  platform=$(docker version -f '{{.Server.Os}}/{{.Server.Arch}}')
+  build_platform=$(docker version -f '{{.Server.Os}}/{{.Server.Arch}}')
 else
   # For push or without load, build for multiple platforms
-  platform="linux/amd64,linux/arm64"
+  build_platform="linux/amd64,linux/arm64"
 fi
 if [[ $dry_run -eq 1 ]]; then
   echo "Dry Run is enabled. Writing build config to docker-build-dry.json"
   jq -n \
     --argjson tags "$(printf '%s\n' "${full_tags[@]}" | jq -R . | jq -s .)" \
-    --arg platform "$platform" \
+    --arg platform "$build_platform" \
     --arg openhands_build_version "$OPENHANDS_BUILD_VERSION" \
     --arg dockerfile "$dir/Dockerfile" \
     '{
@@ -163,14 +170,14 @@ fi
 
 
 
-echo "Building for platform(s): $platform"
+echo "Building for platform(s): $build_platform"
 
 docker buildx build \
   $args \
   --build-arg OPENHANDS_BUILD_VERSION="$OPENHANDS_BUILD_VERSION" \
   --cache-from=type=registry,ref=$DOCKER_REPOSITORY:$cache_tag \
   --cache-from=type=registry,ref=$DOCKER_REPOSITORY:$cache_tag_base-main \
-  --platform $platform \
+  --platform $build_platform \
   --provenance=false \
   -f "$dir/Dockerfile" \
   "$DOCKER_BASE_DIR"
