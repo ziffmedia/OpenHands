@@ -22,26 +22,37 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  # Build OpenHands App Image using native compilation
   build-app:
     name: Build OpenHands App Image
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
-    outputs:
-      image-digest: ${{ steps.build.outputs.digest }}
-      image-tags: ${{ steps.meta.outputs.tags }}
+      attestations: write
+      id-token: write
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Prepare
+        run: |
+          platform='${{ matrix.platform }}'
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
 
-      - name: Login to GHCR
+      - name: Log in to Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
@@ -49,73 +60,102 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Lowercase Repository Owner
-        run: |
-          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
-
-      - name: Extract metadata
+      - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
-
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./containers/app/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            OPENHANDS_BUILD_VERSION=${{ github.ref_name }}
-
-  build-runtime:
-    name: Build Runtime Images
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      matrix:
-        base_image:
-          - name: nikolaik
-            image: nikolaik/python-nodejs:python3.12-nodejs22
-          - name: ubuntu
-            image: ubuntu:24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GHCR
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./containers/app/Dockerfile
+          # Only tag by registry + image name to push by digest
+          tags: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha,scope=app-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=app-${{ env.PLATFORM_PAIR }}
+          build-args: |
+            OPENHANDS_BUILD_VERSION=${{ github.ref_name }}
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-app-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Generate artifact attestation
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # Build Runtime Images using native compilation
+  build-runtime:
+    name: Build Runtime Images
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            base_image_name: nikolaik
+            base_image: nikolaik/python-nodejs:python3.12-nodejs22
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            base_image_name: nikolaik
+            base_image: nikolaik/python-nodejs:python3.12-nodejs22
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            base_image_name: ubuntu
+            base_image: ubuntu:24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            base_image_name: ubuntu
+            base_image: ubuntu:24.04
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare
+        run: |
+          platform='${{ matrix.platform }}'
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Log in to Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Lowercase Repository Owner
-        run: |
-          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -132,39 +172,176 @@ jobs:
         run: |
           mkdir -p containers/runtime
           poetry run python3 openhands/runtime/utils/runtime_build.py \
-            --base_image ${{ matrix.base_image.image }} \
+            --base_image ${{ matrix.base_image }} \
             --build_folder containers/runtime \
             --force_rebuild
 
-      - name: Extract metadata
+      - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/runtime
-          tags: |
-            type=ref,event=branch,suffix=-${{ matrix.base_image.name }}
-            type=ref,event=pr,suffix=-${{ matrix.base_image.name }}
-            type=semver,pattern={{version}},suffix=-${{ matrix.base_image.name }}
-            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.base_image.name }}
-            type=semver,pattern={{major}},suffix=-${{ matrix.base_image.name }}
-            type=raw,value=latest-${{ matrix.base_image.name }},enable={{is_default_branch}}
-            type=sha,suffix=-${{ matrix.base_image.name }}
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: ./containers/runtime
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          # Only tag by registry + image name to push by digest
+          tags: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=runtime-${{ matrix.base_image.name }}
-          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.base_image.name }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha,scope=runtime-${{ matrix.base_image_name }}-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.base_image_name }}-${{ env.PLATFORM_PAIR }}
 
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}-${{ matrix.base_image_name }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-runtime-${{ matrix.base_image_name }}-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Generate artifact attestation
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # Merge multi-architecture manifests for App image
+  merge-app:
+    name: Merge App Image Manifests
+    runs-on: ubuntu-24.04
+    needs: [build-app]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-app-*
+          merge-multiple: true
+
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app:${{ steps.meta.outputs.version }}
+
+  # Merge multi-architecture manifests for Runtime images
+  merge-runtime:
+    name: Merge Runtime Image Manifests
+    runs-on: ubuntu-24.04
+    needs: [build-runtime]
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        base_image_name: [nikolaik, ubuntu]
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-runtime-${{ matrix.base_image_name }}-*
+          merge-multiple: true
+
+      - name: Lowercase Repository Owner
+        run: |
+          echo REPO_OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]') >> $GITHUB_ENV
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime
+          tags: |
+            type=ref,event=branch,suffix=-${{ matrix.base_image_name }}
+            type=ref,event=pr,suffix=-${{ matrix.base_image_name }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.base_image_name }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.base_image_name }}
+            type=semver,pattern={{major}},suffix=-${{ matrix.base_image_name }}
+            type=raw,value=latest-${{ matrix.base_image_name }},enable={{is_default_branch}}
+            type=sha,suffix=-${{ matrix.base_image_name }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime@sha256:%s ' *${{ matrix.base_image_name }})
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime:${{ steps.meta.outputs.version }}
+
+  # Test the built images
   test-images:
     name: Test Built Images
     runs-on: ubuntu-latest
-    needs: [build-app, build-runtime]
+    needs: [merge-app, merge-runtime]
     if: github.event_name != 'pull_request'
     strategy:
       matrix:
@@ -179,8 +356,8 @@ jobs:
 
       - name: Test app image
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands:${{ github.sha }} python -c "import openhands; print('OpenHands app image works!')"
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-app:${{ github.sha }} python -c "import openhands; print('OpenHands app image works!')"
 
       - name: Test runtime image
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/runtime:${{ github.sha }}-${{ matrix.base_image }} python -c "print('Runtime image works!')"
+          docker run --rm ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime:${{ github.sha }}-${{ matrix.base_image }} python -c "print('Runtime image works!')"
