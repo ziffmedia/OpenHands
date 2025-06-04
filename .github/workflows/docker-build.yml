@@ -331,7 +331,7 @@ jobs:
         working-directory: ${{ runner.temp }}/digests
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime@sha256:%s ' *${{ matrix.base_image_name }})
+            $(for f in *${{ matrix.base_image_name }}; do printf '${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/openhands-runtime@sha256:%s ' "${f%-${{ matrix.base_image_name }}}"; done)
 
       - name: Inspect image
         run: |
