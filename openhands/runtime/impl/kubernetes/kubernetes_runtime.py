@@ -2,6 +2,7 @@ from functools import lru_cache
 from typing import Callable, Optional
 from uuid import UUID
 
+import os
 import tenacity
 import yaml
 from kubernetes import client, config
