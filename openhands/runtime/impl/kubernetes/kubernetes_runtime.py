@@ -513,15 +513,20 @@ class KubernetesRuntime(ActionExecutionClient):
             success_threshold=1,
             failure_threshold=3,
         )
-        # Prepare command
-        # Entry point command for generated sandbox runtime pod.
-        command = get_action_execution_server_startup_command(
-            server_port=self._container_port,
-            plugins=self.plugins,
-            app_config=self.config,
-            override_user_id=0,  # if we use the default of app_config.run_as_openhands then we cant edit files in vscode due to file perms.
-            override_username='root',
-        )
+
+        # Add this check before line 518
+        if os.environ.get('CUSTOM_RUNTIME_COMMAND'):
+          command = os.environ.get('CUSTOM_RUNTIME_COMMAND').split()
+        else:
+          # Prepare command
+          # Entry point command for generated sandbox runtime pod.
+          command = get_action_execution_server_startup_command(
+              server_port=self._container_port,
+              plugins=self.plugins,
+              app_config=self.config,
+              override_user_id=0,  # if we use the default of app_config.run_as_openhands then we cant edit files in vscode due to file perms.
+              override_username='root',
+          )
 
         # Prepare resource requirements based on config
         resources = V1ResourceRequirements(
