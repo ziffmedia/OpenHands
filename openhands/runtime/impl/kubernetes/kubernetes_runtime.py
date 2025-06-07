@@ -473,6 +473,10 @@ class KubernetesRuntime(ActionExecutionClient):
         for key, value in self.config.sandbox.runtime_startup_env_vars.items():
             environment.append(V1EnvVar(name=key, value=value))
 
+        # Add SANDBOX_ENV_ variables
+        for key, value in self.initial_env_vars.items():
+            environment.append(V1EnvVar(name=key, value=value))
+
         # Prepare volume mounts if workspace is configured
         volume_mounts = [
             V1VolumeMount(
@@ -515,7 +519,6 @@ class KubernetesRuntime(ActionExecutionClient):
             failure_threshold=3,
         )
 
-        # Add this check before line 518
         if os.environ.get('CUSTOM_RUNTIME_COMMAND'):
           command = os.environ.get('CUSTOM_RUNTIME_COMMAND').split()
         else:
