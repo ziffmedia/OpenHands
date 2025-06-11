@@ -552,7 +552,7 @@ class KubernetesRuntime(ActionExecutionClient):
             env=environment,
             ports=container_ports,
             volume_mounts=volume_mounts,
-            working_dir='/openhands/code/',
+            working_dir='/workspace/',
             resources=resources,
             readiness_probe=health_check,
             security_context=security_context,
