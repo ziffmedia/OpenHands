@@ -357,41 +357,68 @@ class KubernetesRuntime(ActionExecutionClient):
             ingress_name = KubernetesRuntime._get_vscode_ingress_name(pod_name)
             pvc_name = KubernetesRuntime._get_pvc_name(pod_name)
 
-            try:
-                if remove_pvc:
-                    # Delete PVC if requested
+            # Delete PVC if requested
+            if remove_pvc:
+                try:
                     k8s_api.delete_namespaced_persistent_volume_claim(
                         name=pvc_name,
                         namespace=namespace,
                         body=client.V1DeleteOptions(),
                     )
                     logger.info(f'Deleted PVC {pvc_name}')
+                except client.rest.ApiException as e:
+                    if e.status == 404:
+                        logger.info(f'PVC {pvc_name} not found, already deleted')
+                    else:
+                        logger.error(f'Error deleting PVC {pvc_name}: {e}')
 
+            try:
                 k8s_api.delete_namespaced_pod(
                     name=pod_name,
                     namespace=namespace,
                     body=client.V1DeleteOptions(),
                 )
                 logger.info(f'Deleted pod {pod_name}')
+            except client.rest.ApiException as e:
+                if e.status == 404:
+                    logger.info(f'Pod {pod_name} not found, already deleted')
+                else:
+                    logger.error(f'Error deleting pod {pod_name}: {e}')
 
+            try:
                 k8s_api.delete_namespaced_service(
                     name=service_name,
                     namespace=namespace,
                 )
                 logger.info(f'Deleted service {service_name}')
-                # Delete the vs code service
+            except client.rest.ApiException as e:
+                if e.status == 404:
+                    logger.info(f'Service {service_name} not found, already deleted')
+                else:
+                    logger.error(f'Error deleting service {service_name}: {e}')
+
+            try:
                 k8s_api.delete_namespaced_service(
                     name=vscode_service_name, namespace=namespace
                 )
                 logger.info(f'Deleted service {vscode_service_name}')
+            except client.rest.ApiException as e:
+                if e.status == 404:
+                    logger.info(f'Service {vscode_service_name} not found, already deleted')
+                else:
+                    logger.error(f'Error deleting service {vscode_service_name}: {e}')
 
+            try:
                 k8s_networking_api.delete_namespaced_ingress(
                     name=ingress_name, namespace=namespace
                 )
                 logger.info(f'Deleted ingress {ingress_name}')
-            except client.rest.ApiException:
-                # Service might not exist, ignore
-                pass
+            except client.rest.ApiException as e:
+                if e.status == 404:
+                    logger.info(f'Ingress {ingress_name} not found, already deleted')
+                else:
+                    logger.error(f'Error deleting ingress {ingress_name}: {e}')
+
             logger.info('Cleaned up Kubernetes resources')
         except Exception as e:
             logger.error(f'Error cleaning up k8s resources: {e}')
