@@ -582,7 +582,7 @@ class KubernetesRuntime(ActionExecutionClient):
             env=environment,
             ports=container_ports,
             volume_mounts=volume_mounts,
-            working_dir='/workspace/',
+            working_dir=self._k8s_config.working_dir,
             resources=resources,
             readiness_probe=health_check,
             security_context=security_context,

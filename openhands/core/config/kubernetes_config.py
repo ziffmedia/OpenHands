@@ -77,5 +77,9 @@ class KubernetesConfig(BaseModel):
         default=None,
         description='Optional setting to allow privilege escalation in the runtime sandbox container',
     )
+    working_dir: str = Field(
+        default="/openhands/code/",
+        description='Optional working directory for the runtime sandbox container',
+    )
 
     model_config = {'extra': 'forbid'}
