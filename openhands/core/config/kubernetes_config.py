@@ -61,5 +61,21 @@ class KubernetesConfig(BaseModel):
         default=False,
         description='Run the runtime sandbox container in privileged mode for use with docker-in-docker',
     )
+    psc_run_as_user: str | None = Field(
+        default=None,
+        description='Optional user ID to run the runtime sandbox container as',
+    )
+    psc_run_as_group: str | None = Field(
+        default=None,
+        description='Optional group ID to run the runtime sandbox container as',
+    )
+    psc_fs_group: str | None = Field(
+        default=None,
+        description='Optional file system group ID for the runtime sandbox container',
+    )
+    psc_allow_privilege_escalation: str | None = Field(
+        default=None,
+        description='Optional setting to allow privilege escalation in the runtime sandbox container',
+    )
 
     model_config = {'extra': 'forbid'}
