@@ -24,6 +24,7 @@ from kubernetes.client.models import (
     V1PersistentVolumeClaimVolumeSource,
     V1Pod,
     V1PodSpec,
+    V1PodSecurityContext,
     V1ResourceRequirements,
     V1SecurityContext,
     V1Service,
@@ -569,7 +570,9 @@ class KubernetesRuntime(ActionExecutionClient):
         )
 
         # Set security context for the container
-        security_context = V1SecurityContext(privileged=self._k8s_config.privileged)
+        security_context = V1SecurityContext(
+            privileged=self._k8s_config.privileged,
+        )
 
         # Create the container definition
         container = V1Container(
@@ -591,6 +594,17 @@ class KubernetesRuntime(ActionExecutionClient):
             image_pull_secrets = [
                 client.V1LocalObjectReference(name=self._k8s_config.image_pull_secret)
             ]
+
+        pod_security_context = V1PodSecurityContext()
+        if self._k8s_config.psc_run_as_user is not None:
+            pod_security_context.run_as_user = int(self._k8s_config.psc_run_as_user)
+        if self._k8s_config.psc_run_as_group is not None:
+            pod_security_context.run_as_group = int(self._k8s_config.psc_run_as_group)
+        if self._k8s_config.psc_fs_group is not None:
+            pod_security_context.fs_group = int(self._k8s_config.psc_fs_group)
+        if self._k8s_config.psc_allow_privilege_escalation is not None:
+            pod_security_context.allow_privilege_escalation = self._k8s_config.psc_allow_privilege_escalation.lower() == 'true'
+
         pod = V1Pod(
             metadata=V1ObjectMeta(
                 name=self.pod_name, labels={'app': POD_LABEL, 'session': self.sid}
@@ -602,6 +616,7 @@ class KubernetesRuntime(ActionExecutionClient):
                 image_pull_secrets=image_pull_secrets,
                 node_selector=self.node_selector,
                 tolerations=self.tolerations,
+                security_context=pod_security_context,
             ),
         )
 
