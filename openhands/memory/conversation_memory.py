@@ -16,6 +16,7 @@ from openhands.events.action import (
     CmdRunAction,
     FileEditAction,
     FileReadAction,
+    FileWriteAction
     IPythonRunCellAction,
     MessageAction,
 )
@@ -383,7 +384,7 @@ class ConversationMemory:
                 content.append(ImageContent(image_urls=obs.image_urls))
 
             message = Message(role='user', content=content)
-        elif isinstance(obs, FileEditObservation):
+        elif isinstance(obs, FileEditObservation) or isinstance(obs, FileWriteObservation):
             text = truncate_content(str(obs), max_message_chars)
             message = Message(role='user', content=[TextContent(text=text)])
         elif isinstance(obs, FileReadObservation):
