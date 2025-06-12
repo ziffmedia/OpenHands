@@ -24,6 +24,7 @@ from kubernetes.client.models import (
     V1PersistentVolumeClaimVolumeSource,
     V1Pod,
     V1PodSpec,
+    V1PodSecurityContext,
     V1ResourceRequirements,
     V1SecurityContext,
     V1Service,
@@ -594,7 +595,7 @@ class KubernetesRuntime(ActionExecutionClient):
                 client.V1LocalObjectReference(name=self._k8s_config.image_pull_secret)
             ]
 
-        pod_security_context = V1SecurityContext()
+        pod_security_context = V1PodSecurityContext()
         if self._k8s_config.psc_run_as_user is not None:
             pod_security_context.run_as_user = int(self._k8s_config.psc_run_as_user)
         if self._k8s_config.psc_run_as_group is not None:
