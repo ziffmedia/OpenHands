@@ -31,6 +31,7 @@ from openhands.events.observation import (
     CmdOutputObservation,
     FileEditObservation,
     FileReadObservation,
+    FileWriteObservation,
     IPythonRunCellObservation,
     UserRejectObservation,
 )
