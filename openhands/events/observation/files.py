@@ -184,12 +184,10 @@ class FileEditObservation(Observation):
         """Get a string representation of the file edit observation."""
         if self.impl_source == FileEditSource.OH_ACI:
             return self.content
-
         if not self.prev_exist:
-            assert self.old_content == '', (
-                'old_content should be empty if the file is new (prev_exist=False).'
+            assert self.old_content in ('', None), (
+              'old_content should be empty or None if the file is new (prev_exist=False).'
             )
             return f'[New file {self.path} is created with the provided content.]\n'
-
         # Use cached diff if available, otherwise compute it
         return self.visualize_diff().rstrip() + '\n'
