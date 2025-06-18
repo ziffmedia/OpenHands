@@ -1067,3 +1067,6 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f'Error listing files: {e}')
             return JSONResponse(content=[])
+
+    logger.debug(f'Starting action execution API on port {args.port}')
+    run(app, host='0.0.0.0', port=args.port)
