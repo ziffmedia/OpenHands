@@ -221,6 +221,13 @@ class KubernetesRuntime(ActionExecutionClient):
         self.send_status_message('STATUS$STARTING_RUNTIME')
         self.log('info', f'Using API URL {self.api_url}')
 
+        # Validate Kubernetes configuration first
+        try:
+            await call_sync_from_async(self._validate_k8s_config)
+        except Exception as e:
+            self.log('error', f'Kubernetes validation failed: {e}')
+            raise AgentRuntimeNotFoundError(f'Kubernetes validation failed: {e}') from e
+
         try:
             await call_sync_from_async(self._attach_to_pod)
         except client.rest.ApiException as e:
@@ -305,10 +312,10 @@ class KubernetesRuntime(ActionExecutionClient):
             raise
 
     @tenacity.retry(
-        stop=tenacity.stop_after_delay(120) | stop_if_should_exit(),
+        stop=tenacity.stop_after_delay(180) | stop_if_should_exit(),
         retry=tenacity.retry_if_exception_type(TimeoutError),
         reraise=True,
-        wait=tenacity.wait_fixed(2),
+        wait=tenacity.wait_fixed(3),
     )
     def _wait_until_ready(self):
         """Wait until the runtime server is alive by checking the pod status in Kubernetes."""
@@ -316,11 +323,46 @@ class KubernetesRuntime(ActionExecutionClient):
         pod = self.k8s_client.read_namespaced_pod(
             name=self.pod_name, namespace=self._k8s_namespace
         )
+
+        # Log detailed pod status for debugging
+        self.log('info', f'Pod phase: {pod.status.phase}')
+        if pod.status.container_statuses:
+            for container_status in pod.status.container_statuses:
+                self.log('info', f'Container {container_status.name} ready: {container_status.ready}')
+                if container_status.state.waiting:
+                    self.log('error', f'Container {container_status.name} waiting: {container_status.state.waiting.reason} - {container_status.state.waiting.message}')
+                if container_status.state.terminated:
+                    self.log('error', f'Container {container_status.name} terminated: {container_status.state.terminated.reason} - {container_status.state.terminated.message}')
+
+        # Log pod events for debugging
+        try:
+            events = self.k8s_client.list_namespaced_event(
+                namespace=self._k8s_namespace,
+                field_selector=f'involvedObject.name={self.pod_name}'
+            )
+            for event in events.items[-5:]:  # Show last 5 events
+                self.log('warning', f'Pod event: {event.type} - {event.reason}: {event.message}')
+        except Exception as e:
+            self.log('warning', f'Could not fetch pod events: {e}')
+
         if pod.status.phase == 'Running' and pod.status.conditions:
             for condition in pod.status.conditions:
                 if condition.type == 'Ready' and condition.status == 'True':
                     self.log('info', f'Pod {self.pod_name} is ready!')
                     return True  # Exit the function if the pod is ready
+
+        # More detailed error reporting for non-ready pods
+        if pod.status.phase == 'Failed':
+            debug_info = self._get_pod_debug_info()
+            self.log('error', f'Pod failed - Debug info:\n{debug_info}')
+            raise RuntimeError(f'Pod {self.pod_name} failed to start. Check pod events and logs.')
+        elif pod.status.phase == 'Pending':
+            # Check if it's a scheduling issue
+            if pod.status.conditions:
+                for condition in pod.status.conditions:
+                    if condition.type == 'PodScheduled' and condition.status == 'False':
+                        self.log('error', f'Pod scheduling failed: {condition.reason} - {condition.message}')
+            self.log('warning', f'Pod {self.pod_name} is still pending. This could be due to resource constraints, image pull issues, or scheduling problems.')
 
         self.log(
             'info',
@@ -560,18 +602,40 @@ class KubernetesRuntime(ActionExecutionClient):
               override_username='root',
           )
 
-        # Prepare resource requirements based on config
+        # Prepare resource requirements based on config with fallback to smaller defaults
+        try:
+            memory_limit = self._k8s_config.resource_memory_limit
+            cpu_request = self._k8s_config.resource_cpu_request
+            memory_request = self._k8s_config.resource_memory_request
+        except AttributeError:
+            # Fallback to more conservative defaults if config is incomplete
+            memory_limit = '2Gi'
+            cpu_request = '500m'
+            memory_request = '1Gi'
+            self.log('warning', 'Using fallback resource limits due to incomplete config')
+
         resources = V1ResourceRequirements(
-            limits={'memory': self._k8s_config.resource_memory_limit},
+            limits={'memory': memory_limit},
             requests={
-                'cpu': self._k8s_config.resource_cpu_request,
-                'memory': self._k8s_config.resource_memory_request,
+                'cpu': cpu_request,
+                'memory': memory_request,
             },
         )
 
-        # Set security context for the container
+        self.log('info', f'Pod resources: requests={resources.requests}, limits={resources.limits}')
+
+        # Set security context for the container with more permissive defaults if needed
+        try:
+            privileged = self._k8s_config.privileged
+        except AttributeError:
+            privileged = False
+            self.log('warning', 'Privileged mode not configured, defaulting to False')
+
         security_context = V1SecurityContext(
-            privileged=self._k8s_config.privileged,
+            privileged=privileged,
+            # Add some defaults that often help with permission issues
+            run_as_user=0 if privileged else None,
+            allow_privilege_escalation=privileged,
         )
 
         # Create the container definition
@@ -586,7 +650,12 @@ class KubernetesRuntime(ActionExecutionClient):
             resources=resources,
             readiness_probe=health_check,
             security_context=security_context,
+            image_pull_policy='IfNotPresent',  # Try to use local image first to avoid pull issues
         )
+
+        self.log('info', f'Container image: {self.pod_image}')
+        self.log('info', f'Container command: {" ".join(command) if command else "default"}')
+        self.log('info', f'Working directory: {self._k8s_config.working_dir}')
 
         # Create the pod definition
         image_pull_secrets = None
@@ -595,15 +664,25 @@ class KubernetesRuntime(ActionExecutionClient):
                 client.V1LocalObjectReference(name=self._k8s_config.image_pull_secret)
             ]
 
+        # Build pod security context with safer defaults
         pod_security_context = V1PodSecurityContext()
-        if self._k8s_config.psc_run_as_user is not None:
-            pod_security_context.run_as_user = int(self._k8s_config.psc_run_as_user)
-        if self._k8s_config.psc_run_as_group is not None:
-            pod_security_context.run_as_group = int(self._k8s_config.psc_run_as_group)
-        if self._k8s_config.psc_fs_group is not None:
-            pod_security_context.fs_group = int(self._k8s_config.psc_fs_group)
-        if self._k8s_config.psc_allow_privilege_escalation is not None:
-            pod_security_context.allow_privilege_escalation = self._k8s_config.psc_allow_privilege_escalation.lower() == 'true'
+        try:
+            if self._k8s_config.psc_run_as_user is not None:
+                pod_security_context.run_as_user = int(self._k8s_config.psc_run_as_user)
+            if self._k8s_config.psc_run_as_group is not None:
+                pod_security_context.run_as_group = int(self._k8s_config.psc_run_as_group)
+            if self._k8s_config.psc_fs_group is not None:
+                pod_security_context.fs_group = int(self._k8s_config.psc_fs_group)
+            if self._k8s_config.psc_allow_privilege_escalation is not None:
+                pod_security_context.allow_privilege_escalation = self._k8s_config.psc_allow_privilege_escalation.lower() == 'true'
+        except (AttributeError, ValueError) as e:
+            self.log('warning', f'Error setting pod security context: {e}, using defaults')
+            # Use safer defaults if configuration is missing or invalid
+            if privileged:
+                pod_security_context.run_as_user = 0
+                pod_security_context.allow_privilege_escalation = True
+
+        self.log('info', f'Pod security context: run_as_user={getattr(pod_security_context, "run_as_user", None)}, fs_group={getattr(pod_security_context, "fs_group", None)}')
 
         pod = V1Pod(
             metadata=V1ObjectMeta(
@@ -681,12 +760,60 @@ class KubernetesRuntime(ActionExecutionClient):
                 return False
             self.log('error', f'Error checking PVC existence: {e}')
 
+    def _validate_k8s_config(self):
+        """Validate Kubernetes configuration and cluster access."""
+        try:
+            # Test basic cluster connectivity
+            self.k8s_client.list_namespace()
+            self.log('info', 'Successfully connected to Kubernetes cluster')
+
+            # Check if namespace exists
+            try:
+                self.k8s_client.read_namespace(name=self._k8s_namespace)
+                self.log('info', f'Namespace {self._k8s_namespace} exists')
+            except client.rest.ApiException as e:
+                if e.status == 404:
+                    self.log('error', f'Namespace {self._k8s_namespace} does not exist')
+                    raise RuntimeError(f'Namespace {self._k8s_namespace} not found')
+                else:
+                    raise
+
+            # Check storage class if specified
+            if hasattr(self._k8s_config, 'pvc_storage_class') and self._k8s_config.pvc_storage_class:
+                try:
+                    storage_client = client.StorageV1Api()
+                    storage_client.read_storage_class(name=self._k8s_config.pvc_storage_class)
+                    self.log('info', f'Storage class {self._k8s_config.pvc_storage_class} exists')
+                except client.rest.ApiException as e:
+                    if e.status == 404:
+                        self.log('warning', f'Storage class {self._k8s_config.pvc_storage_class} not found, PVC creation may fail')
+                    else:
+                        self.log('warning', f'Could not verify storage class: {e}')
+
+            # Test RBAC permissions by trying to list pods in the namespace
+            try:
+                self.k8s_client.list_namespaced_pod(namespace=self._k8s_namespace, limit=1)
+                self.log('info', 'RBAC permissions for pods verified')
+            except client.rest.ApiException as e:
+                if e.status == 403:
+                    self.log('error', f'Insufficient RBAC permissions to manage pods in namespace {self._k8s_namespace}')
+                    raise RuntimeError('Insufficient Kubernetes RBAC permissions')
+                else:
+                    raise
+
+        except Exception as e:
+            self.log('error', f'Kubernetes configuration validation failed: {e}')
+            raise RuntimeError(f'Kubernetes validation failed: {e}')
+
     def _init_k8s_resources(self):
         """Initialize the Kubernetes resources."""
         self.log('info', 'Preparing to start pod...')
         self.send_status_message('STATUS$PREPARING_CONTAINER')
 
         self.log('info', f'Runtime will be accessible at {self.api_url}')
+        self.log('info', f'Using image: {self.pod_image}')
+        self.log('info', f'Namespace: {self._k8s_namespace}')
+        self.log('info', f'Resource limits: CPU={self._k8s_config.resource_cpu_request}, Memory={self._k8s_config.resource_memory_limit}')
 
         pod = self._get_runtime_pod_manifest()
         service = self._get_runtime_service_manifest()
@@ -698,13 +825,30 @@ class KubernetesRuntime(ActionExecutionClient):
         try:
             if not self._pvc_exists():
                 # Create PVC if it doesn't exist
-                self.k8s_client.create_namespaced_persistent_volume_claim(
-                    namespace=self._k8s_namespace, body=pvc_manifest
+                try:
+                    self.k8s_client.create_namespaced_persistent_volume_claim(
+                        namespace=self._k8s_namespace, body=pvc_manifest
+                    )
+                    self.log('info', f'Created PVC {self._get_pvc_name(self.pod_name)}')
+                except client.rest.ApiException as pvc_error:
+                    self.log('error', f'Failed to create PVC: {pvc_error}')
+                    if 'StorageClass' in str(pvc_error):
+                        self.log('error', f'Storage class "{self._k8s_config.pvc_storage_class}" may not exist in the cluster')
+                    raise
+            else:
+                self.log('info', f'PVC {self._get_pvc_name(self.pod_name)} already exists')
+
+            try:
+                self.k8s_client.create_namespaced_pod(
+                    namespace=self._k8s_namespace, body=pod
                 )
-                self.log('info', f'Created PVC {self._get_pvc_name(self.pod_name)}')
-            self.k8s_client.create_namespaced_pod(
-                namespace=self._k8s_namespace, body=pod
-            )
+            except client.rest.ApiException as pod_error:
+                self.log('error', f'Failed to create pod: {pod_error}')
+                if 'Forbidden' in str(pod_error):
+                    self.log('error', 'Pod creation forbidden - check RBAC permissions and security policies')
+                elif 'invalid' in str(pod_error).lower():
+                    self.log('error', 'Pod manifest is invalid - check resource limits, security context, and image name')
+                raise
             self.log('info', f'Created pod {self.pod_name}.')
             # Create a service to expose the pod for external access
             self.k8s_client.create_namespaced_service(
@@ -811,3 +955,89 @@ class KubernetesRuntime(ActionExecutionClient):
             logger.error(
                 f'Error deleting resources for conversation {conversation_id}: {e}'
             )
+
+    def _get_pod_debug_info(self) -> str:
+        """Get detailed debugging information about the pod."""
+        try:
+            debug_info = []
+
+            # Get pod details
+            pod = self.k8s_client.read_namespaced_pod(
+                name=self.pod_name, namespace=self._k8s_namespace
+            )
+
+            debug_info.append(f"Pod Status: {pod.status.phase}")
+            debug_info.append(f"Pod IP: {pod.status.pod_ip}")
+            debug_info.append(f"Host IP: {pod.status.host_ip}")
+            debug_info.append(f"Start Time: {pod.status.start_time}")
+
+            # Container statuses
+            if pod.status.container_statuses:
+                for container_status in pod.status.container_statuses:
+                    debug_info.append(f"Container {container_status.name}:")
+                    debug_info.append(f"  Ready: {container_status.ready}")
+                    debug_info.append(f"  Restart Count: {container_status.restart_count}")
+                    if container_status.state.waiting:
+                        debug_info.append(f"  Waiting: {container_status.state.waiting.reason} - {container_status.state.waiting.message}")
+                    elif container_status.state.running:
+                        debug_info.append(f"  Running since: {container_status.state.running.started_at}")
+                    elif container_status.state.terminated:
+                        debug_info.append(f"  Terminated: {container_status.state.terminated.reason} - {container_status.state.terminated.message}")
+                        debug_info.append(f"  Exit Code: {container_status.state.terminated.exit_code}")
+
+            # Pod conditions
+            if pod.status.conditions:
+                debug_info.append("Pod Conditions:")
+                for condition in pod.status.conditions:
+                    debug_info.append(f"  {condition.type}: {condition.status} - {condition.reason}")
+                    if condition.message:
+                        debug_info.append(f"    Message: {condition.message}")
+
+            # Pod events
+            try:
+                events = self.k8s_client.list_namespaced_event(
+                    namespace=self._k8s_namespace,
+                    field_selector=f'involvedObject.name={self.pod_name}'
+                )
+                if events.items:
+                    debug_info.append("Recent Events:")
+                    for event in sorted(events.items, key=lambda x: x.first_timestamp or x.event_time)[-10:]:
+                        timestamp = event.first_timestamp or event.event_time
+                        debug_info.append(f"  {timestamp} - {event.type}: {event.reason} - {event.message}")
+            except Exception as e:
+                debug_info.append(f"Could not fetch events: {e}")
+
+            # Try to get container logs if available
+            try:
+                logs = self.k8s_client.read_namespaced_pod_log(
+                    name=self.pod_name,
+                    namespace=self._k8s_namespace,
+                    container='runtime',
+                    tail_lines=20
+                )
+                if logs:
+                    debug_info.append("Container Logs (last 20 lines):")
+                    debug_info.append(logs)
+            except Exception as e:
+                debug_info.append(f"Could not fetch container logs: {e}")
+
+            return "\n".join(debug_info)
+
+        except Exception as e:
+            return f"Error getting pod debug info: {e}"
+
+    def _check_runtime_health(self) -> bool:
+        """Check if the runtime server is actually responding to health checks."""
+        try:
+            import requests
+            health_url = f'{self.api_url}/alive'
+            response = requests.get(health_url, timeout=5)
+            if response.status_code == 200:
+                self.log('info', f'Runtime health check passed at {health_url}')
+                return True
+            else:
+                self.log('warning', f'Runtime health check failed with status {response.status_code}')
+                return False
+        except Exception as e:
+            self.log('warning', f'Runtime health check failed: {e}')
+            return False

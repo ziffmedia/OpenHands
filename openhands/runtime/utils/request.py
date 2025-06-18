@@ -4,6 +4,7 @@ from typing import Any
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from openhands.core.logger import openhands_logger as logger
 from openhands.utils.http_session import HttpSession
 from openhands.utils.tenacity_stop import stop_if_should_exit
 
@@ -23,16 +24,21 @@ class RequestHTTPError(httpx.HTTPStatusError):
 
 
 def is_retryable_error(exception: Any) -> bool:
-    return (
-        isinstance(exception, httpx.HTTPStatusError)
-        and exception.response.status_code == 429
-    )
+    # Retry on rate limiting (429) and server errors (5xx)
+    if isinstance(exception, (httpx.HTTPStatusError, RequestHTTPError)):
+        if hasattr(exception, 'response') and exception.response:
+            status_code = exception.response.status_code
+            is_retryable = status_code == 429 or (500 <= status_code < 600)
+            if is_retryable:
+                logger.warning(f"Retryable error {status_code} detected, will retry: {exception}")
+            return is_retryable
+    return False
 
 
 @retry(
     retry=retry_if_exception(is_retryable_error),
-    stop=stop_after_attempt(3) | stop_if_should_exit(),
-    wait=wait_exponential(multiplier=1, min=4, max=60),
+    stop=stop_after_attempt(5) | stop_if_should_exit(),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
 )
 def send_request(
     session: HttpSession,
