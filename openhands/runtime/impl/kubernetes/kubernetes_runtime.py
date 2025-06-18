@@ -221,13 +221,6 @@ class KubernetesRuntime(ActionExecutionClient):
         self.send_status_message('STATUS$STARTING_RUNTIME')
         self.log('info', f'Using API URL {self.api_url}')
 
-        # Validate Kubernetes configuration first
-        try:
-            await call_sync_from_async(self._validate_k8s_config)
-        except Exception as e:
-            self.log('error', f'Kubernetes validation failed: {e}')
-            raise AgentRuntimeNotFoundError(f'Kubernetes validation failed: {e}') from e
-
         try:
             await call_sync_from_async(self._attach_to_pod)
         except client.rest.ApiException as e:
@@ -761,51 +754,6 @@ class KubernetesRuntime(ActionExecutionClient):
             if e.status == 404:
                 return False
             self.log('error', f'Error checking PVC existence: {e}')
-
-    def _validate_k8s_config(self):
-        """Validate Kubernetes configuration and cluster access."""
-        try:
-            # Test basic cluster connectivity
-            self.k8s_client.list_namespace()
-            self.log('info', 'Successfully connected to Kubernetes cluster')
-
-            # Check if namespace exists
-            try:
-                self.k8s_client.read_namespace(name=self._k8s_namespace)
-                self.log('info', f'Namespace {self._k8s_namespace} exists')
-            except client.rest.ApiException as e:
-                if e.status == 404:
-                    self.log('error', f'Namespace {self._k8s_namespace} does not exist')
-                    raise RuntimeError(f'Namespace {self._k8s_namespace} not found')
-                else:
-                    raise
-
-            # Check storage class if specified
-            if hasattr(self._k8s_config, 'pvc_storage_class') and self._k8s_config.pvc_storage_class:
-                try:
-                    storage_client = client.StorageV1Api()
-                    storage_client.read_storage_class(name=self._k8s_config.pvc_storage_class)
-                    self.log('info', f'Storage class {self._k8s_config.pvc_storage_class} exists')
-                except client.rest.ApiException as e:
-                    if e.status == 404:
-                        self.log('warning', f'Storage class {self._k8s_config.pvc_storage_class} not found, PVC creation may fail')
-                    else:
-                        self.log('warning', f'Could not verify storage class: {e}')
-
-            # Test RBAC permissions by trying to list pods in the namespace
-            try:
-                self.k8s_client.list_namespaced_pod(namespace=self._k8s_namespace, limit=1)
-                self.log('info', 'RBAC permissions for pods verified')
-            except client.rest.ApiException as e:
-                if e.status == 403:
-                    self.log('error', f'Insufficient RBAC permissions to manage pods in namespace {self._k8s_namespace}')
-                    raise RuntimeError('Insufficient Kubernetes RBAC permissions')
-                else:
-                    raise
-
-        except Exception as e:
-            self.log('error', f'Kubernetes configuration validation failed: {e}')
-            raise RuntimeError(f'Kubernetes validation failed: {e}')
 
     def _init_k8s_resources(self):
         """Initialize the Kubernetes resources."""
