@@ -629,7 +629,7 @@ class KubernetesRuntime(ActionExecutionClient):
 
         # Add SANDBOX_ENV_ variables
         for key, value in self.initial_env_vars.items():
-            environment.append(V1EnvVar(name=key.upper(), value=value))
+            environment.append(V1EnvVar(name=key, value=value))
 
         # Prepare volume mounts if workspace is configured
         volume_mounts = [
