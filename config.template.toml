@@ -375,6 +375,13 @@ classpath = "my_package.my_module.MyCustomAgent"
 # Run the runtime sandbox container in privileged mode for use with docker-in-docker
 #privileged = false
 
+# Custom annotations to add to the runtime pod (as key-value pairs)
+# Example:
+# [sandbox.kubernetes.annotations]
+# "monitoring.io/scrape" = "true"
+# "app.kubernetes.io/version" = "1.0.0"
+# "custom.annotation/value" = "test-value"
+
 #################################### Security ###################################
 # Configuration for security features
 ##############################################################################

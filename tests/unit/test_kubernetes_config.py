@@ -21,6 +21,7 @@ def test_kubernetes_config_defaults():
     assert config.node_selector_val is None
     assert config.tolerations_yaml is None
     assert config.privileged is False
+    assert config.annotations == {}
 
 
 def test_kubernetes_config_custom_values():
@@ -71,3 +72,24 @@ def test_kubernetes_config_validation():
     # Test that extra fields are not allowed
     with pytest.raises(ValidationError):
         KubernetesConfig(extra_field='not allowed')
+
+
+def test_kubernetes_config_annotations():
+    """Test that KubernetesConfig properly handles annotations."""
+    # Test empty annotations (default)
+    config = KubernetesConfig()
+    assert config.annotations == {}
+
+    # Test custom annotations
+    annotations = {
+        'monitoring.io/scrape': 'true',
+        'app.kubernetes.io/version': '1.0.0',
+        'custom.annotation/value': 'test-value'
+    }
+    config = KubernetesConfig(annotations=annotations)
+    assert config.annotations == annotations
+
+    # Test annotations in SandboxConfig
+    k8s_config = KubernetesConfig(annotations={'test.io/label': 'value'})
+    sandbox_config = SandboxConfig(kubernetes=k8s_config)
+    assert sandbox_config.kubernetes.annotations == {'test.io/label': 'value'}
