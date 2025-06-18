@@ -348,7 +348,7 @@ class Runtime(FileEditRuntimeMixin):
                 action = CmdRunAction(
                     command='git init',
                 )
-                self.run_action(action)
+                await call_sync_from_async(self.run_action, action)
             else:
                 logger.info(
                     'In workspace mount mode, not initializing a new git repository.'
@@ -410,7 +410,7 @@ class Runtime(FileEditRuntimeMixin):
             command=f'{clone_command} ; cd {dir_name} ; {checkout_command}',
         )
         self.log('info', f'Cloning repo: {selected_repository}')
-        self.run_action(action)
+        await call_sync_from_async(self.run_action, action)
         return dir_name
 
     def maybe_run_setup_script(self):
