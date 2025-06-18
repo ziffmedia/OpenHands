@@ -5,11 +5,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from fastapi import Request, status
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request as StarletteRequest
-from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from openhands.server import shared
@@ -17,30 +13,24 @@ from openhands.server.types import SessionMiddlewareInterface
 from openhands.server.user_auth import get_user_id
 
 
-class LocalhostCORSMiddleware(CORSMiddleware):
+class LocalhostCORSMiddleware:
     """
-    Custom CORS middleware that allows any request from localhost/127.0.0.1 domains,
+    Raw ASGI CORS middleware that allows any request from localhost/127.0.0.1 domains,
     while using standard CORS rules for other origins.
     """
 
     def __init__(self, app: ASGIApp) -> None:
+        self.app = app
         allow_origins_str = os.getenv('PERMITTED_CORS_ORIGINS')
         if allow_origins_str:
-            allow_origins = tuple(
+            self.allow_origins = tuple(
                 origin.strip() for origin in allow_origins_str.split(',')
             )
         else:
-            allow_origins = ()
-        super().__init__(
-            app,
-            allow_origins=allow_origins,
-            allow_credentials=True,
-            allow_methods=['*'],
-            allow_headers=['*'],
-        )
+            self.allow_origins = ()
 
-    def is_allowed_origin(self, origin: str) -> bool:
-        if origin and not self.allow_origins and not self.allow_origin_regex:
+    def is_allowed_origin(self, origin: str | None) -> bool:
+        if origin and not self.allow_origins:
             parsed = urlparse(origin)
             hostname = parsed.hostname or ''
 
@@ -48,28 +38,93 @@ class LocalhostCORSMiddleware(CORSMiddleware):
             if hostname in ['localhost', '127.0.0.1']:
                 return True
 
-        return super().is_allowed_origin(origin)
+        if origin and self.allow_origins:
+            return origin in self.allow_origins
+
+        return False
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "")
+        headers_dict = dict(scope.get("headers", []))
+        origin = headers_dict.get(b"origin", b"").decode("latin1")
+
+        # Handle preflight requests
+        if method == "OPTIONS":
+            if origin and self.is_allowed_origin(origin):
+                response_headers = [
+                    (b"access-control-allow-origin", origin.encode("latin1")),
+                    (b"access-control-allow-credentials", b"true"),
+                    (b"access-control-allow-methods", b"*"),
+                    (b"access-control-allow-headers", b"*"),
+                    (b"access-control-max-age", b"86400"),
+                ]
+            else:
+                response_headers = []
+
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": response_headers,
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b"",
+            })
+            return
+
+        # Handle regular requests
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start" and origin and self.is_allowed_origin(origin):
+                headers = list(message.get("headers", []))
+                headers.extend([
+                    (b"access-control-allow-origin", origin.encode("latin1")),
+                    (b"access-control-allow-credentials", b"true"),
+                ])
+                message = {**message, "headers": headers}
+
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
-class CacheControlMiddleware(BaseHTTPMiddleware):
+class CacheControlMiddleware:
     """
-    Middleware to disable caching for all routes by adding appropriate headers
+    Raw ASGI middleware to disable caching for all routes by adding appropriate headers
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        response = await call_next(request)
-        if request.url.path.startswith('/assets'):
-            # The content of the assets directory has fingerprinted file names so we cache aggressively
-            response.headers['Cache-Control'] = 'public, max-age=2592000, immutable'
-        else:
-            response.headers['Cache-Control'] = (
-                'no-cache, no-store, must-revalidate, max-age=0'
-            )
-            response.headers['Pragma'] = 'no-cache'
-            response.headers['Expires'] = '0'
-        return response
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+
+                if path.startswith('/assets'):
+                    # The content of the assets directory has fingerprinted file names so we cache aggressively
+                    headers.append((b'cache-control', b'public, max-age=2592000, immutable'))
+                else:
+                    headers.extend([
+                        (b'cache-control', b'no-cache, no-store, must-revalidate, max-age=0'),
+                        (b'pragma', b'no-cache'),
+                        (b'expires', b'0'),
+                    ])
+
+                message = {**message, "headers": headers}
+
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 class InMemoryRateLimiter:
@@ -108,30 +163,45 @@ class InMemoryRateLimiter:
         return True
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
+class RateLimitMiddleware:
+    """
+    Raw ASGI middleware for rate limiting
+    """
+
     def __init__(self, app: ASGIApp, rate_limiter: InMemoryRateLimiter):
-        super().__init__(app)
+        self.app = app
         self.rate_limiter = rate_limiter
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        if not self.is_rate_limited_request(request):
-            return await call_next(request)
+    def is_rate_limited_request(self, path: str) -> bool:
+        if path.startswith('/assets'):
+            return False
+        # Put Other non rate limited checks here
+        return True
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if not self.is_rate_limited_request(path):
+            await self.app(scope, receive, send)
+            return
+
+        # Create a minimal request object for rate limiting
+        request = Request(scope, receive)
         ok = await self.rate_limiter(request)
+
         if not ok:
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=429,
                 content={'message': 'Too many requests'},
                 headers={'Retry-After': '1'},
             )
-        return await call_next(request)
+            await response(scope, receive, send)
+            return
 
-    def is_rate_limited_request(self, request: StarletteRequest) -> bool:
-        if request.url.path.startswith('/assets'):
-            return False
-        # Put Other non rate limited checks here
-        return True
+        await self.app(scope, receive, send)
 
 
 class AttachConversationMiddleware(SessionMiddlewareInterface):
