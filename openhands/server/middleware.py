@@ -260,6 +260,15 @@ class AttachConversationMiddleware(SessionMiddlewareInterface):
                     'content': {'error': 'Session not found'}
                 }
 
+            # Initialize state if it doesn't exist
+            if 'state' not in scope:
+                scope['state'] = {}
+
+            # Store conversation in scope state so it can be accessed via request.state.conversation
+            scope['state']['conversation'] = conversation
+            scope['state']['conversation_id'] = conversation_id
+
+            # Also store in scope for backwards compatibility
             scope['conversation'] = conversation
             scope['conversation_id'] = conversation_id
             return True, {}
@@ -275,7 +284,8 @@ class AttachConversationMiddleware(SessionMiddlewareInterface):
         Detach the user's session.
         """
         try:
-            conversation = scope.get('conversation')
+            # Try to get conversation from either location
+            conversation = scope.get('conversation') or (scope.get('state', {}).get('conversation') if scope.get('state') else None)
             if conversation:
                 await shared.conversation_manager.detach_from_conversation(conversation)
         except Exception:
