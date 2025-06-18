@@ -78,6 +78,7 @@ class LocalhostCORSMiddleware:
 
         # Handle regular requests
         async def send_wrapper(message):
+            # Only modify headers for response start messages
             if message["type"] == "http.response.start" and origin and self.is_allowed_origin(origin):
                 headers = list(message.get("headers", []))
                 headers.extend([
@@ -107,6 +108,7 @@ class CacheControlMiddleware:
         path = scope.get("path", "")
 
         async def send_wrapper(message):
+            # Only modify headers for response start messages
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
 

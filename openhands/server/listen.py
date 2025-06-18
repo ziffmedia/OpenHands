@@ -1,7 +1,7 @@
 import os
 
 import socketio
-from starlette.middleware import Middleware
+from fastapi.middleware.cors import CORSMiddleware
 
 from openhands.server.app import app as base_app
 from openhands.server.listen_socket import sio
@@ -9,7 +9,6 @@ from openhands.server.middleware import (
     AttachConversationMiddleware,
     CacheControlMiddleware,
     InMemoryRateLimiter,
-    LocalhostCORSMiddleware,
     RateLimitMiddleware,
 )
 from openhands.server.static import SPAStaticFiles
@@ -19,15 +18,37 @@ if os.getenv('SERVE_FRONTEND', 'true').lower() == 'true':
         '/', SPAStaticFiles(directory='./frontend/build', html=True), name='dist'
     )
 
-# Use the middleware stack directly to avoid BaseHTTPMiddleware wrapping
-base_app.middleware_stack = base_app.build_middleware_stack()
+# Configure CORS origins - allow localhost and any configured origins
+allowed_origins = []
 
-# Add middleware directly to avoid Starlette's automatic wrapping
-base_app.user_middleware = [
-    Middleware(LocalhostCORSMiddleware),
-    Middleware(CacheControlMiddleware),
-    Middleware(RateLimitMiddleware, rate_limiter=InMemoryRateLimiter(requests=10, seconds=1)),
-    Middleware(AttachConversationMiddleware),
-] + base_app.user_middleware
+# Allow localhost/127.0.0.1 with common development ports
+for host in ['localhost', '127.0.0.1']:
+    for port in [3000, 3001, 8000, 8080]:
+        allowed_origins.extend([
+            f'http://{host}:{port}',
+            f'https://{host}:{port}',
+        ])
+
+# Add any additional configured origins from environment
+cors_origins_env = os.getenv('PERMITTED_CORS_ORIGINS')
+if cors_origins_env:
+    additional_origins = [origin.strip() for origin in cors_origins_env.split(',')]
+    allowed_origins.extend(additional_origins)
+
+# Use FastAPI's built-in CORS middleware instead of custom one
+# to ensure better compatibility with socketio.ASGIApp
+base_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*"],
+)
+base_app.add_middleware(CacheControlMiddleware)
+base_app.add_middleware(
+    RateLimitMiddleware,
+    rate_limiter=InMemoryRateLimiter(requests=10, seconds=1),
+)
+base_app.add_middleware(AttachConversationMiddleware)
 
 app = socketio.ASGIApp(sio, other_asgi_app=base_app)
