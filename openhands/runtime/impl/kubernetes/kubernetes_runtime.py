@@ -232,10 +232,10 @@ class KubernetesRuntime(ActionExecutionClient):
         # Use Redis coordination to prevent race conditions between replicas
         pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"        # Perform startup cleanup to handle stale states
         await self._startup_cleanup()
-        
+
         # Clean up old pods if auto-cleanup is enabled
         await self._cleanup_old_pods_if_needed()
-        
+
         # Try the enhanced create-or-attach logic with Redis coordination
         try:
             success = await self._create_or_attach_with_coordination(pod_key)
@@ -917,17 +917,17 @@ class KubernetesRuntime(ActionExecutionClient):
         # When Redis coordination is enabled, we should NOT clean up the Kubernetes pod
         # immediately because other replicas might want to attach to it.
         # Only clean up the local state and Redis coordination state.
-        if (self._coordinator and self._coordinator.enabled and 
+        if (self._coordinator and self._coordinator.enabled and
             getattr(self._k8s_config, 'redis_coordination_enabled', True) and
             getattr(self._k8s_config, 'redis_coordination_keep_pod_alive', True)):
             # Unregister this replica from the pod connections
             try:
                 pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
                 call_sync_from_async(self._unregister_replica_connection)(pod_key)
-                
+
                 # Check if there are any other active replicas connected
                 active_replicas = call_sync_from_async(self._get_active_replica_count)(pod_key)
-                
+
                 if active_replicas == 0:
                     self.log('info', f'No other replicas connected to pod {self.pod_name}, cleaning up')
                     # No other replicas connected, safe to clean up the pod
@@ -942,10 +942,10 @@ class KubernetesRuntime(ActionExecutionClient):
                         self.log('error', f'Error cleaning up pod resources: {e}')
                 else:
                     self.log('info', f'Replica disconnecting from pod {self.pod_name}, but {active_replicas} other replicas still connected')
-                
+
             except Exception as e:
                 self.log('warning', f'Failed to update Redis state during close: {e}')
-            
+
             # Don't perform legacy cleanup when coordination is enabled
             return
 
@@ -1604,16 +1604,16 @@ class KubernetesRuntime(ActionExecutionClient):
     async def _should_cleanup_pod(self, pod_key: str) -> bool:
         """
         Determine if a pod should be cleaned up based on various criteria.
-        
+
         Args:
             pod_key: Redis key for the pod state
-            
+
         Returns:
             True if pod should be cleaned up, False otherwise
         """
         if not self._coordinator or not self._coordinator.enabled:
             return False
-            
+
         try:
             state = await self._get_pod_status_from_redis(pod_key)
             if not state:
@@ -1630,20 +1630,20 @@ class KubernetesRuntime(ActionExecutionClient):
                         # Pod doesn't exist, no cleanup needed
                         return False
                     return False
-                    
+
             # Check pod age - clean up very old pods (configurable threshold)
             age_threshold = getattr(self._k8s_config, 'pod_cleanup_age_threshold', 3600)  # 1 hour default
             if state.get('age_seconds', 0) > age_threshold:
                 self.log('info', f'Pod {self.pod_name} is older than {age_threshold}s, marking for cleanup')
                 return True
-                
+
             # Check if pod is in failed state for too long
             if state.get('status') == 'failed' and state.get('age_seconds', 0) > 300:  # 5 minutes
                 self.log('info', f'Pod {self.pod_name} has been in failed state for too long, marking for cleanup')
                 return True
-                
+
             return False
-            
+
         except Exception as e:
             self.log('warning', f'Error checking if pod should be cleaned up: {e}')
             return False
@@ -1653,23 +1653,23 @@ class KubernetesRuntime(ActionExecutionClient):
         Clean up old or stale pods if coordination is enabled and cleanup is configured.
         This should be called periodically or during startup.
         """
-        if not (self._coordinator and self._coordinator.enabled and 
+        if not (self._coordinator and self._coordinator.enabled and
                 getattr(self._k8s_config, 'redis_coordination_enabled', True)):
             return
-            
+
         # Only perform cleanup if explicitly enabled
         if not getattr(self._k8s_config, 'redis_coordination_auto_cleanup', False):
             return
-            
+
         try:
             pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
-            
+
             if await self._should_cleanup_pod(pod_key):
                 self.log('info', f'Auto-cleaning up old pod {self.pod_name}')
-                
+
                 # Clean up both Redis state and Kubernetes resources
                 await self._coordinator.delete_resource_state(pod_key)
-                
+
                 try:
                     self._cleanup_k8s_resources(
                         namespace=self._k8s_namespace,
@@ -1679,82 +1679,82 @@ class KubernetesRuntime(ActionExecutionClient):
                     self.log('info', f'Successfully cleaned up old pod {self.pod_name}')
                 except Exception as e:
                     self.log('warning', f'Error cleaning up old pod resources: {e}')
-                    
+
         except Exception as e:
             self.log('warning', f'Error during automatic pod cleanup: {e}')
 
     async def _register_replica_connection(self, pod_key: str):
         """
         Register this replica as connected to the pod.
-        
+
         Args:
             pod_key: Redis key for the pod state
         """
         if not self._coordinator or not self._coordinator.enabled:
             return
-            
+
         try:
             replica_id = f"{os.getpid()}-{id(self)}"
             connection_key = f"{pod_key}:connections"
-            
+
             # Add this replica to the set of connected replicas
             await self._coordinator.redis_client.sadd(connection_key, replica_id)
             await self._coordinator.redis_client.expire(connection_key, 7200)  # 2 hours TTL
-            
+
             # Also set a heartbeat for this replica
             heartbeat_key = f"{pod_key}:heartbeat:{replica_id}"
             await self._coordinator.redis_client.setex(heartbeat_key, 300, time.time())  # 5 minute TTL
-            
+
             self.log('debug', f'Registered replica {replica_id} connection to pod {self.pod_name}')
-            
+
         except Exception as e:
             self.log('warning', f'Failed to register replica connection: {e}')
 
     async def _unregister_replica_connection(self, pod_key: str):
         """
         Unregister this replica from the pod connections.
-        
+
         Args:
             pod_key: Redis key for the pod state
         """
         if not self._coordinator or not self._coordinator.enabled:
             return
-            
+
         try:
             replica_id = f"{os.getpid()}-{id(self)}"
             connection_key = f"{pod_key}:connections"
             heartbeat_key = f"{pod_key}:heartbeat:{replica_id}"
-            
+
             # Remove this replica from the set of connected replicas
             await self._coordinator.redis_client.srem(connection_key, replica_id)
             await self._coordinator.redis_client.delete(heartbeat_key)
-            
+
             self.log('debug', f'Unregistered replica {replica_id} connection from pod {self.pod_name}')
-            
+
         except Exception as e:
             self.log('warning', f'Failed to unregister replica connection: {e}')
 
     async def _get_active_replica_count(self, pod_key: str) -> int:
         """
         Get the number of active replicas connected to the pod.
-        
+
         Args:
             pod_key: Redis key for the pod state
-            
+
         Returns:
             Number of active replicas
         """
         if not self._coordinator or not self._coordinator.enabled:
             return 0
-            
+
         try:
             connection_key = f"{pod_key}:connections"
-            
+
             # Get all connected replicas
             replicas = await self._coordinator.redis_client.smembers(connection_key)
             if not replicas:
                 return 0
-                
+
             # Check which replicas have recent heartbeats
             active_count = 0
             for replica_id in replicas:
@@ -1775,9 +1775,9 @@ class KubernetesRuntime(ActionExecutionClient):
                 else:
                     # No heartbeat, remove replica from connections
                     await self._coordinator.redis_client.srem(connection_key, replica_id)
-                    
+
             return active_count
-            
+
         except Exception as e:
             self.log('warning', f'Failed to get active replica count: {e}')
             return 0
@@ -1786,19 +1786,19 @@ class KubernetesRuntime(ActionExecutionClient):
         """
         Maintain heartbeat for this replica while it's connected to the pod.
         Should be called periodically to keep the connection active.
-        
+
         Args:
             pod_key: Redis key for the pod state
         """
         if not self._coordinator or not self._coordinator.enabled:
             return
-            
+
         try:
             replica_id = f"{os.getpid()}-{id(self)}"
             heartbeat_key = f"{pod_key}:heartbeat:{replica_id}"
-            
+
             # Update heartbeat timestamp
             await self._coordinator.redis_client.setex(heartbeat_key, 300, time.time())  # 5 minute TTL
-            
+
         except Exception as e:
             self.log('warning', f'Failed to maintain replica heartbeat: {e}')
