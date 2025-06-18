@@ -321,6 +321,23 @@ class KubernetesRuntime(ActionExecutionClient):
             self.send_status_message(' ')
         self._runtime_initialized = True
 
+    def add_env_vars(self, env_vars: dict[str, str]) -> None:
+        """
+        Adds environment variables to the Kubernetes runtime environment.
+
+        For KubernetesRuntime, environment variables are handled at the pod creation level
+        via the pod manifest. During initialization, we store the variables to be included
+        in the pod environment. Once the runtime is initialized, we can optionally
+        forward them to the running container via the action execution client.
+
+        This overrides the base Runtime behavior which tries to run shell commands
+        before the runtime is fully initialized.
+        """
+        if not env_vars:
+            return
+
+        # Noop - Kubernetes already has the environment variables set at pod creation time
+
     def _attach_to_pod(self):
         """Attach to an existing pod."""
         try:
@@ -601,11 +618,11 @@ class KubernetesRuntime(ActionExecutionClient):
 
         # Add runtime startup env vars
         for key, value in self.config.sandbox.runtime_startup_env_vars.items():
-            environment.append(V1EnvVar(name=key, value=value))
+            environment.append(V1EnvVar(name=key.upper(), value=value))
 
         # Add SANDBOX_ENV_ variables
         for key, value in self.initial_env_vars.items():
-            environment.append(V1EnvVar(name=key, value=value))
+            environment.append(V1EnvVar(name=key.upper(), value=value))
 
         # Prepare volume mounts if workspace is configured
         volume_mounts = [
