@@ -17,6 +17,7 @@ class KubernetesConfig(BaseModel):
         node_selector_key: Optional node selector key for pod scheduling
         node_selector_val: Optional node selector value for pod scheduling
         tolerations_yaml: Optional YAML string defining pod tolerations
+        annotations: Custom annotations to add to the runtime pod
     """
 
     namespace: str = Field(
@@ -80,6 +81,10 @@ class KubernetesConfig(BaseModel):
     working_dir: str = Field(
         default="/openhands/code/",
         description='Optional working directory for the runtime sandbox container',
+    )
+    annotations: dict[str, str] = Field(
+        default_factory=dict,
+        description='Custom annotations to add to the runtime pod',
     )
 
     model_config = {'extra': 'forbid'}

@@ -686,7 +686,9 @@ class KubernetesRuntime(ActionExecutionClient):
 
         pod = V1Pod(
             metadata=V1ObjectMeta(
-                name=self.pod_name, labels={'app': POD_LABEL, 'session': self.sid}
+                name=self.pod_name,
+                labels={'app': POD_LABEL, 'session': self.sid},
+                annotations=self._k8s_config.annotations
             ),
             spec=V1PodSpec(
                 containers=[container],
