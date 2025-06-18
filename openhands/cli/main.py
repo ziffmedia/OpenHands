@@ -190,7 +190,7 @@ async def run_session(
                 # Reload microagents after initialization of repo.md
                 if reload_microagents:
                     microagents: list[BaseMicroagent] = (
-                        runtime.get_microagents_from_selected_repo(None)
+                        await runtime.get_microagents_from_selected_repo(None)
                     )
                     memory.load_user_workspace_microagents(microagents)
                     reload_microagents = False
@@ -251,7 +251,7 @@ async def run_session(
         )
 
     # when memory is created, it will load the microagents from the selected repository
-    memory = create_memory(
+    memory = await create_memory(
         runtime=runtime,
         event_stream=event_stream,
         sid=sid,

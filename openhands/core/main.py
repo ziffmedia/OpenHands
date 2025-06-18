@@ -122,7 +122,7 @@ async def run_controller(
 
     # when memory is created, it will load the microagents from the selected repository
     if memory is None:
-        memory = create_memory(
+        memory = await create_memory(
             runtime=runtime,
             event_stream=event_stream,
             sid=sid,

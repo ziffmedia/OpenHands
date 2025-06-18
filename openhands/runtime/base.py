@@ -607,7 +607,7 @@ fi
 
         return remote_url
 
-    def get_microagents_from_org_or_user(
+    async def get_microagents_from_org_or_user(
         self, selected_repository: str
     ) -> list[BaseMicroagent]:
         """Load microagents from the organization or user level .openhands repository.
@@ -652,7 +652,7 @@ fi
             clone_cmd = f"git clone --depth 1 {remote_url} {org_repo_dir} 2>/dev/null || echo 'Org repo not found'"
 
             action = CmdRunAction(command=clone_cmd)
-            obs = self.run_action(action)
+            obs = await call_sync_from_async(self.run_action, action)
 
             if (
                 isinstance(obs, CmdOutputObservation)
@@ -683,7 +683,7 @@ fi
 
         return loaded_microagents
 
-    def get_microagents_from_selected_repo(
+    async def get_microagents_from_selected_repo(
         self, selected_repository: str | None
     ) -> list[BaseMicroagent]:
         """Load microagents from the selected repository.
@@ -701,7 +701,7 @@ fi
         # Check for user/org level microagents if a repository is selected
         if selected_repository:
             # Load microagents from the org/user level repository
-            org_microagents = self.get_microagents_from_org_or_user(selected_repository)
+            org_microagents = await self.get_microagents_from_org_or_user(selected_repository)
             loaded_microagents.extend(org_microagents)
 
             # Continue with repository-specific microagents

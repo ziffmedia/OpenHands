@@ -461,8 +461,7 @@ class AgentSession:
             memory.set_conversation_instructions(conversation_instructions)
 
             # loads microagents from repo/.openhands/microagents
-            microagents: list[BaseMicroagent] = await call_sync_from_async(
-                self.runtime.get_microagents_from_selected_repo,
+            microagents: list[BaseMicroagent] = await self.runtime.get_microagents_from_selected_repo(
                 selected_repository or None,
             )
             memory.load_user_workspace_microagents(microagents)

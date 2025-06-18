@@ -128,7 +128,7 @@ def initialize_repository_for_runtime(
     return repo_directory
 
 
-def create_memory(
+async def create_memory(
     runtime: Runtime,
     event_stream: EventStream,
     sid: str,
@@ -161,7 +161,7 @@ def create_memory(
         memory.set_runtime_info(runtime, {})
 
         # loads microagents from repo/.openhands/microagents
-        microagents: list[BaseMicroagent] = runtime.get_microagents_from_selected_repo(
+        microagents: list[BaseMicroagent] = await runtime.get_microagents_from_selected_repo(
             selected_repository
         )
         memory.load_user_workspace_microagents(microagents)
