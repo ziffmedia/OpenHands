@@ -99,5 +99,17 @@ class KubernetesConfig(BaseModel):
         default=3,
         description='Number of retry attempts for pod creation when coordination is enabled',
     )
+    redis_coordination_keep_pod_alive: bool = Field(
+        default=True,
+        description='Keep pods alive when a replica disconnects (recommended for multi-replica deployments)',
+    )
+    redis_coordination_auto_cleanup: bool = Field(
+        default=False,
+        description='Automatically clean up old or stale pods (use with caution)',
+    )
+    pod_cleanup_age_threshold: int = Field(
+        default=3600,
+        description='Age threshold in seconds for automatic pod cleanup (default: 1 hour)',
+    )
 
     model_config = {'extra': 'forbid'}

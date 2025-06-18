@@ -392,6 +392,16 @@ classpath = "my_package.my_module.MyCustomAgent"
 # Number of retry attempts for pod creation when coordination is enabled
 #redis_coordination_retry_attempts = 3
 
+# Keep pods alive when a replica disconnects (recommended for multi-replica deployments)
+# Set to false to immediately clean up pods when any replica disconnects
+#redis_coordination_keep_pod_alive = true
+
+# Automatically clean up old or stale pods (use with caution in production)
+#redis_coordination_auto_cleanup = false
+
+# Age threshold in seconds for automatic pod cleanup (default: 1 hour)
+#pod_cleanup_age_threshold = 3600
+
 #################################### Security ###################################
 # Configuration for security features
 ##############################################################################
