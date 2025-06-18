@@ -86,5 +86,18 @@ class KubernetesConfig(BaseModel):
         default_factory=dict,
         description='Custom annotations to add to the runtime pod',
     )
+    # Redis coordination settings
+    redis_coordination_enabled: bool = Field(
+        default=True,
+        description='Enable Redis coordination to prevent race conditions in multi-replica deployments',
+    )
+    redis_coordination_timeout: int = Field(
+        default=30,
+        description='Timeout in seconds to wait for Redis coordination locks',
+    )
+    redis_coordination_retry_attempts: int = Field(
+        default=3,
+        description='Number of retry attempts for pod creation when coordination is enabled',
+    )
 
     model_config = {'extra': 'forbid'}

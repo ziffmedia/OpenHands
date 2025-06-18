@@ -382,6 +382,16 @@ classpath = "my_package.my_module.MyCustomAgent"
 # "app.kubernetes.io/version" = "1.0.0"
 # "custom.annotation/value" = "test-value"
 
+# Redis coordination settings for multi-replica deployments
+# Enable Redis coordination to prevent race conditions when multiple replicas try to create the same pod
+#redis_coordination_enabled = true
+
+# Timeout in seconds to wait for Redis coordination locks
+#redis_coordination_timeout = 30
+
+# Number of retry attempts for pod creation when coordination is enabled
+#redis_coordination_retry_attempts = 3
+
 #################################### Security ###################################
 # Configuration for security features
 ##############################################################################

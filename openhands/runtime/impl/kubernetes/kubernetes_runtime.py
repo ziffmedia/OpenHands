@@ -2,8 +2,10 @@ from functools import lru_cache
 from typing import Callable, Optional
 from uuid import UUID
 
+import asyncio
 import os
 import tenacity
+import time
 import yaml
 from kubernetes import client, config
 from kubernetes.client.models import (
@@ -53,6 +55,7 @@ from openhands.runtime.utils.log_streamer import LogStreamer
 from openhands.utils.async_utils import call_sync_from_async
 from openhands.utils.shutdown_listener import add_shutdown_listener
 from openhands.utils.tenacity_stop import stop_if_should_exit
+from openhands.utils.redis_coordination import get_coordinator
 
 POD_NAME_PREFIX = 'openhands-runtime-'
 POD_LABEL = 'openhands-runtime'
@@ -78,6 +81,7 @@ class KubernetesRuntime(ActionExecutionClient):
 
     _shutdown_listener_id: UUID | None = None
     _namespace: str = ''
+    _coordinator = None
 
     def __init__(
         self,
@@ -221,29 +225,63 @@ class KubernetesRuntime(ActionExecutionClient):
         self.send_status_message('STATUS$STARTING_RUNTIME')
         self.log('info', f'Using API URL {self.api_url}')
 
-        try:
-            await call_sync_from_async(self._attach_to_pod)
-        except client.rest.ApiException as e:
-            # we are not set to attach to existing, ignore error and init k8s resources.
-            if self.attach_to_existing:
-                self.log(
-                    'error',
-                    f'Pod {self.pod_name} not found or cannot connect to it.',
-                )
-                raise AgentRuntimeDisconnectedError from e
+        # Initialize Redis coordinator for multi-replica coordination
+        if self._coordinator is None:
+            self._coordinator = await get_coordinator()
 
-            self.log('info', f'Starting runtime with image: {self.pod_image}')
-            try:
-                await call_sync_from_async(self._init_k8s_resources)
-                self.log(
-                    'info',
-                    f'Pod started: {self.pod_name}. VSCode URL: {self.vscode_url}',
-                )
-            except Exception as init_error:
-                self.log('error', f'Failed to initialize k8s resources: {init_error}')
-                raise AgentRuntimeNotFoundError(
-                    f'Failed to initialize kubernetes resources: {init_error}'
-                ) from init_error
+        # Use Redis coordination to prevent race conditions between replicas
+        pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
+
+        # Perform startup cleanup to handle stale states
+        await self._startup_cleanup()
+
+        # Try the enhanced create-or-attach logic with Redis coordination
+        try:
+            success = await self._create_or_attach_with_coordination(pod_key)
+            if not success:
+                # Fallback to legacy behavior if coordination fails
+                self.log('warning', 'Redis coordination failed, falling back to legacy pod creation')
+                await self._fallback_pod_creation()
+        except Exception as e:
+            self.log('error', f'Pod creation/attachment failed: {e}')
+            raise
+
+        if DEBUG_RUNTIME:
+            # Log streamer for kubernetes pods
+            # This is a simplified version that just uses the pod name
+            self.log_streamer = LogStreamer(self.pod_name, self.log)
+        else:
+            self.log_streamer = None
+
+        if not self.attach_to_existing:
+            self.log('info', 'Waiting for pod to become ready ...')
+            self.send_status_message('STATUS$WAITING_FOR_CLIENT')
+
+        try:
+            await call_sync_from_async(self._wait_until_ready)
+        except Exception as alive_error:
+            self.log('error', f'Failed to connect to runtime: {alive_error}')
+            self.send_error_message(
+                'ERROR$RUNTIME_CONNECTION',
+                f'Failed to connect to runtime: {alive_error}',
+            )
+            raise AgentRuntimeDisconnectedError(
+                f'Failed to connect to runtime: {alive_error}'
+            ) from alive_error
+
+        if not self.attach_to_existing:
+            self.log('info', 'Runtime is ready.')
+
+        if not self.attach_to_existing:
+            await call_sync_from_async(self.setup_initial_env)
+
+        self.log(
+            'info',
+            f'Pod initialized with plugins: {[plugin.name for plugin in self.plugins]}. VSCode URL: {self.vscode_url}',
+        )
+        if not self.attach_to_existing:
+            self.send_status_message(' ')
+        self._runtime_initialized = True
 
         if DEBUG_RUNTIME:
             # Log streamer for kubernetes pods
@@ -289,19 +327,47 @@ class KubernetesRuntime(ActionExecutionClient):
                 name=self.pod_name, namespace=self._k8s_namespace
             )
 
-            if pod.status.phase != 'Running':
+            self.log('info', f'Found existing pod {self.pod_name} in phase: {pod.status.phase}')
+
+            if pod.status.phase == 'Pending':
+                self.log('info', f'Pod {self.pod_name} is pending, waiting for it to become ready')
+                self._wait_until_ready()
+            elif pod.status.phase == 'Running':
+                # Check if pod is actually ready
+                if pod.status.container_statuses:
+                    all_ready = all(status.ready for status in pod.status.container_statuses)
+                    if not all_ready:
+                        self.log('info', f'Pod {self.pod_name} is running but containers not ready, waiting')
+                        self._wait_until_ready()
+                    else:
+                        self.log('info', f'Pod {self.pod_name} is running and ready')
+                else:
+                    # Wait a bit longer to ensure pod is fully ready
+                    self._wait_until_ready()
+            elif pod.status.phase == 'Failed':
+                raise AgentRuntimeDisconnectedError(
+                    f'Pod {self.pod_name} is in Failed state. Check pod logs for details.'
+                )
+            elif pod.status.phase == 'Succeeded':
+                raise AgentRuntimeDisconnectedError(
+                    f'Pod {self.pod_name} has completed execution and cannot be attached to.'
+                )
+            else:
                 try:
                     self._wait_until_ready()
                 except TimeoutError:
                     raise AgentRuntimeDisconnectedError(
-                        f'Pod {self.pod_name} exists but failed to become ready.'
+                        f'Pod {self.pod_name} exists but failed to become ready within timeout.'
                     )
 
             self.log('info', f'Successfully attached to pod {self.pod_name}')
             return True
 
         except client.rest.ApiException as e:
-            self.log('error', f'Failed to attach to pod: {e}')
+            if e.status == 404:
+                self.log('debug', f'Pod {self.pod_name} not found')
+            else:
+                self.log('error', f'Failed to attach to pod: {e}')
             raise
 
     @tenacity.retry(
@@ -838,10 +904,20 @@ class KubernetesRuntime(ActionExecutionClient):
         # this is called when a single conversation question is answered or a tab is closed.
         self.log(
             'info',
-            f'Closing runtime and cleaning up resources for conersation ID: {self.sid}',
+            f'Closing runtime and cleaning up resources for conversation ID: {self.sid}',
         )
         # Call parent class close method first
         super().close()
+
+        # Clean up Redis state if coordinator is available
+        if self._coordinator and self._coordinator.enabled:
+            try:
+                pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
+                # Use call_sync_from_async to run async method
+                call_sync_from_async(self._coordinator.delete_resource_state)(pod_key)
+                self.log('debug', f'Cleaned up Redis state for {pod_key}')
+            except Exception as e:
+                self.log('warning', f'Failed to clean up Redis state: {e}')
 
         # Close log streamer if it exists
         if self.log_streamer:
@@ -895,6 +971,17 @@ class KubernetesRuntime(ActionExecutionClient):
         """Delete resources associated with a conversation."""
         # This is triggered when you actually do the delete in the UI on the convo.
         try:
+            # Clean up Redis state if coordinator is available
+            coordinator = await get_coordinator()
+            if coordinator and coordinator.enabled:
+                try:
+                    pod_name = cls._get_pod_name(conversation_id)
+                    pod_key = f"k8s-pod:{cls._namespace}:{pod_name}"
+                    await coordinator.delete_resource_state(pod_key)
+                    logger.debug(f'Cleaned up Redis state for conversation {conversation_id}')
+                except Exception as e:
+                    logger.warning(f'Failed to clean up Redis state for conversation {conversation_id}: {e}')
+
             cls._cleanup_k8s_resources(
                 namespace=cls._namespace,
                 remove_pvc=True,
@@ -991,3 +1078,493 @@ class KubernetesRuntime(ActionExecutionClient):
         except Exception as e:
             self.log('warning', f'Runtime health check failed: {e}')
             return False
+
+    def _log_coordination_metrics(self, action: str, pod_key: str, state: dict | None = None):
+        """
+        Log coordination metrics for monitoring and debugging.
+
+        Args:
+            action: The action being performed (e.g., 'attach_success', 'create_start', 'lock_acquired')
+            pod_key: The Redis key for the pod
+            state: Optional state information
+        """
+        metrics = {
+            'action': action,
+            'pod_name': self.pod_name,
+            'namespace': self._k8s_namespace,
+            'replica_id': f"{os.getpid()}-{id(self)}",
+            'timestamp': time.time(),
+        }
+
+        if state:
+            metrics['redis_state'] = state
+
+        # Log as structured data for easy parsing by monitoring systems
+        self.log('info', f'COORDINATION_METRIC: {metrics}')
+
+    async def _get_coordination_status(self) -> dict:
+        """
+        Get comprehensive coordination status for debugging.
+
+        Returns:
+            Dictionary with coordination status information
+        """
+        pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
+        status = {
+            'pod_name': self.pod_name,
+            'namespace': self._k8s_namespace,
+            'replica_id': f"{os.getpid()}-{id(self)}",
+            'coordinator_enabled': self._coordinator and self._coordinator.enabled,
+            'redis_state': None,
+            'kubernetes_state': None,
+            'coordination_config': {
+                'enabled': getattr(self._k8s_config, 'redis_coordination_enabled', True),
+                'timeout': getattr(self._k8s_config, 'redis_coordination_timeout', 30),
+                'retry_attempts': getattr(self._k8s_config, 'redis_coordination_retry_attempts', 3),
+            }
+        }
+
+        # Get Redis state
+        if self._coordinator and self._coordinator.enabled:
+            try:
+                status['redis_state'] = await self._get_pod_status_from_redis(pod_key)
+            except Exception as e:
+                status['redis_error'] = str(e)
+
+        # Get Kubernetes state
+        try:
+            pod = self.k8s_client.read_namespaced_pod(
+                name=self.pod_name, namespace=self._k8s_namespace
+            )
+            status['kubernetes_state'] = {
+                'phase': pod.status.phase,
+                'pod_ip': pod.status.pod_ip,
+                'start_time': str(pod.status.start_time) if pod.status.start_time else None,
+                'ready': pod.status.conditions and any(
+                    c.type == 'Ready' and c.status == 'True'
+                    for c in pod.status.conditions
+                ) if pod.status.conditions else False
+            }
+        except client.rest.ApiException as e:
+            if e.status == 404:
+                status['kubernetes_state'] = {'phase': 'NotFound'}
+            else:
+                status['kubernetes_error'] = str(e)
+        except Exception as e:
+            status['kubernetes_error'] = str(e)
+
+        return status
+
+    async def _create_or_attach_with_coordination(self, pod_key: str) -> bool:
+        """
+        Enhanced create-or-attach logic using Redis coordination.
+
+        Args:
+            pod_key: Redis key for coordinating this pod
+
+        Returns:
+            True if successful, False if coordination failed
+        """
+        if not self._coordinator or not self._coordinator.enabled:
+            self.log('warning', 'Redis coordinator not available')
+            return False
+
+        # Use configuration settings for coordination behavior
+        if not getattr(self._k8s_config, 'redis_coordination_enabled', True):
+            self.log('info', 'Redis coordination disabled by configuration')
+            return False
+
+        max_attempts = getattr(self._k8s_config, 'redis_coordination_retry_attempts', 3)
+        coordination_timeout = getattr(self._k8s_config, 'redis_coordination_timeout', 30)
+
+        for attempt in range(max_attempts):
+            self.log('info', f'Pod coordination attempt {attempt + 1}/{max_attempts}')
+
+            # Step 1: Try to attach to existing pod
+            try:
+                await call_sync_from_async(self._attach_to_pod)
+                self.log('info', f'Successfully attached to existing pod {self.pod_name}')
+                self._log_coordination_metrics('attach_success', pod_key)
+                return True
+            except client.rest.ApiException:
+                # Pod doesn't exist or isn't ready, continue
+                pass
+
+            # Handle attach_to_existing mode
+            if self.attach_to_existing:
+                self.log('error', f'Pod {self.pod_name} not found or cannot connect to it.')
+                raise AgentRuntimeDisconnectedError(f'Pod {self.pod_name} not found')
+
+            # Step 2: Check if another replica is creating the pod
+            existing_state = await self._coordinator.get_resource_state(pod_key)
+            if existing_state:
+                status = existing_state.get('status')
+                timestamp = existing_state.get('timestamp', 0)
+                age_seconds = time.time() - timestamp
+
+                if status == 'creating' and age_seconds < 300:  # 5 minutes
+                    self.log('info', f'Another replica is creating pod {self.pod_name} (age: {age_seconds:.1f}s), waiting...')
+                    # Wait with exponential backoff
+                    wait_time = min(2 ** attempt, 10)
+                    await asyncio.sleep(wait_time)
+                    continue
+                elif status == 'created':
+                    self.log('info', f'Pod {self.pod_name} was created by another replica, attempting to attach')
+                    # Try to attach one more time
+                    try:
+                        await call_sync_from_async(self._attach_to_pod)
+                        self.log('info', f'Successfully attached to pod created by another replica')
+                        self._log_coordination_metrics('attach_success', pod_key)
+                        return True
+                    except client.rest.ApiException:
+                        self.log('warning', f'Pod marked as created but cannot attach, clearing state')
+                        await self._coordinator.delete_resource_state(pod_key)
+                elif status == 'failed' or age_seconds > 300:
+                    self.log('info', f'Previous creation attempt failed or timed out, clearing state')
+                    await self._coordinator.delete_resource_state(pod_key)
+
+            # Step 3: Try to acquire lock for creation
+            if await self._try_create_pod_with_lock(pod_key, coordination_timeout):
+                return True
+
+            # If all attempts fail, wait before retry
+            if attempt < max_attempts - 1:
+                wait_time = min(2 ** attempt, 10)
+                self.log('info', f'Creation attempt failed, waiting {wait_time}s before retry')
+                await asyncio.sleep(wait_time)
+
+        self.log('error', f'Failed to create or attach to pod after {max_attempts} attempts')
+        return False
+
+    async def _try_create_pod_with_lock(self, pod_key: str, coordination_timeout: int = 300) -> bool:
+        """
+        Try to create a pod with distributed locking.
+
+        Args:
+            pod_key: Redis key for coordinating this pod
+
+        Returns:
+            True if pod was successfully created
+        """
+        lock_acquired = False
+        try:
+            # Try to acquire lock with configurable timeout
+            self.log('info', f'Attempting to acquire lock for pod creation: {pod_key}')
+            lock_acquired = await self._coordinator.acquire_lock(pod_key, timeout=coordination_timeout)
+
+            if not lock_acquired:
+                self.log('info', f'Could not acquire lock for {pod_key}')
+                return False
+
+            # Double-check if pod exists now that we have the lock
+            try:
+                await call_sync_from_async(self._attach_to_pod)
+                self.log('info', f'Pod {self.pod_name} was created while waiting for lock, attached successfully')
+                self._log_coordination_metrics('attach_success', pod_key)
+                return True
+            except client.rest.ApiException:
+                pass  # Pod still doesn't exist, proceed to create
+
+            # Mark that we're creating the pod
+            replica_id = f"{os.getpid()}-{id(self)}"  # More unique identifier
+            await self._coordinator.set_resource_state(pod_key, {
+                'status': 'creating',
+                'replica_id': replica_id,
+                'timestamp': time.time(),
+                'pod_name': self.pod_name
+            }, ttl=600)
+
+            self.log('info', f'Starting runtime with image: {self.pod_image}')
+
+            # Create the pod
+            await call_sync_from_async(self._init_k8s_resources)
+
+            # Wait for pod to become ready and healthy
+            if not await self._wait_for_pod_with_timeout():
+                raise RuntimeError(f'Pod {self.pod_name} failed to become ready within timeout')
+
+            # Mark pod as created successfully
+            await self._coordinator.set_resource_state(pod_key, {
+                'status': 'created',
+                'replica_id': replica_id,
+                'timestamp': time.time(),
+                'pod_name': self.pod_name
+            }, ttl=3600)
+
+            self.log('info', f'Pod started: {self.pod_name}. VSCode URL: {self.vscode_url}')
+            self._log_coordination_metrics('create_success', pod_key)
+            return True
+
+        except Exception as init_error:
+            # Mark creation as failed
+            try:
+                await self._coordinator.set_resource_state(pod_key, {
+                    'status': 'failed',
+                    'replica_id': f"{os.getpid()}-{id(self)}",
+                    'timestamp': time.time(),
+                    'error': str(init_error)
+                }, ttl=300)  # Shorter TTL for failed states
+            except Exception:
+                pass  # Don't fail on Redis errors during cleanup
+
+            self.log('error', f'Failed to initialize k8s resources: {init_error}')
+            raise AgentRuntimeNotFoundError(
+                f'Failed to initialize kubernetes resources: {init_error}'
+            ) from init_error
+
+        finally:
+            if lock_acquired:
+                await self._coordinator.release_lock(pod_key)
+                self.log('debug', f'Released lock for {pod_key}')
+
+        return False
+
+    async def _fallback_pod_creation(self):
+        """
+        Fallback pod creation when Redis coordination is not available.
+        This implements a simple retry mechanism with exponential backoff.
+        """
+        self.log('warning', 'Using fallback pod creation without Redis coordination')
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                # Try to attach to existing pod first
+                try:
+                    await call_sync_from_async(self._attach_to_pod)
+                    self.log('info', f'Successfully attached to existing pod {self.pod_name}')
+                    break
+                except client.rest.ApiException:
+                    if self.attach_to_existing:
+                        self.log('error', f'Pod {self.pod_name} not found or cannot connect to it.')
+                        raise AgentRuntimeDisconnectedError(f'Pod {self.pod_name} not found')
+
+                # Try to create the pod
+                self.log('info', f'Creating pod {self.pod_name} (attempt {attempt + 1}/{max_attempts})')
+                await call_sync_from_async(self._init_k8s_resources)
+                self.log('info', f'Pod started: {self.pod_name}. VSCode URL: {self.vscode_url}')
+                break
+
+            except client.rest.ApiException as e:
+                if 'AlreadyExists' in str(e):
+                    # Another replica created the pod, try to attach
+                    self.log('info', 'Pod already exists, attempting to attach')
+                    try:
+                        await call_sync_from_async(self._attach_to_pod)
+                        self.log('info', f'Successfully attached to existing pod {self.pod_name}')
+                        break
+                    except client.rest.ApiException:
+                        if attempt < max_attempts - 1:
+                            wait_time = 2 ** attempt
+                            self.log('info', f'Attach failed, retrying in {wait_time}s')
+                            await asyncio.sleep(wait_time)
+                        else:
+                            raise
+                else:
+                    # Other error, propagate
+                    raise
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    wait_time = 2 ** attempt
+                    self.log('warning', f'Pod creation failed: {e}, retrying in {wait_time}s')
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+
+    async def _get_pod_status_from_redis(self, pod_key: str) -> dict | None:
+        """
+        Get pod status from Redis with additional metadata.
+
+        Args:
+            pod_key: Redis key for the pod state
+
+        Returns:
+            Dictionary with pod status and metadata, or None if not found
+        """
+        if not self._coordinator or not self._coordinator.enabled:
+            return None
+
+        try:
+            state = await self._coordinator.get_resource_state(pod_key)
+            if state:
+                # Add computed fields
+                timestamp = state.get('timestamp', 0)
+                state['age_seconds'] = time.time() - timestamp if timestamp else 0
+                state['age_human'] = self._format_duration(state['age_seconds'])
+
+            return state
+        except Exception as e:
+            self.log('warning', f'Failed to get pod status from Redis: {e}')
+            return None
+
+    def _format_duration(self, seconds: float) -> str:
+        """Format duration in human-readable format."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            return f"{seconds/60:.1f}m"
+        else:
+            return f"{seconds/3600:.1f}h"
+
+    async def _cleanup_stale_redis_states(self):
+        """
+        Clean up stale Redis states for pods that no longer exist.
+        This should be called periodically or during startup.
+        """
+        if not self._coordinator or not self._coordinator.enabled:
+            return
+
+        try:
+            # This is a simplified cleanup - in a production system you might
+            # want to scan for all pod keys and clean up stale ones
+            pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
+            state = await self._get_pod_status_from_redis(pod_key)
+
+            if state and state.get('age_seconds', 0) > 3600:  # 1 hour
+                # Check if pod actually exists
+                try:
+                    await call_sync_from_async(lambda: self.k8s_client.read_namespaced_pod(
+                        name=self.pod_name, namespace=self._k8s_namespace
+                    ))
+                except client.rest.ApiException as e:
+                    if e.status == 404:
+                        # Pod doesn't exist, clean up Redis state
+                        await self._coordinator.delete_resource_state(pod_key)
+                        self.log('info', f'Cleaned up stale Redis state for non-existent pod {self.pod_name}')
+
+        except Exception as e:
+            self.log('warning', f'Error during Redis cleanup: {e}')
+
+    async def _verify_pod_health(self) -> bool:
+        """
+        Verify that the pod is healthy and ready to accept connections.
+
+        Returns:
+            True if pod is healthy, False otherwise
+        """
+        try:
+            # First check Kubernetes pod status
+            pod = self.k8s_client.read_namespaced_pod(
+                name=self.pod_name, namespace=self._k8s_namespace
+            )
+
+            if pod.status.phase != 'Running':
+                self.log('debug', f'Pod {self.pod_name} not in Running state: {pod.status.phase}')
+                return False
+
+            # Check if all containers are ready
+            if pod.status.container_statuses:
+                for status in pod.status.container_statuses:
+                    if not status.ready:
+                        self.log('debug', f'Container {status.name} not ready')
+                        return False
+
+            # Check if pod conditions indicate readiness
+            if pod.status.conditions:
+                ready_condition = next(
+                    (c for c in pod.status.conditions if c.type == 'Ready'),
+                    None
+                )
+                if not ready_condition or ready_condition.status != 'True':
+                    self.log('debug', f'Pod ready condition not met')
+                    return False
+
+            # Additional health check: try to connect to the runtime API
+            try:
+                # This will timeout quickly if the service isn't ready
+                response = await call_sync_from_async(lambda: self._check_runtime_health())
+                if response:
+                    self.log('debug', f'Pod {self.pod_name} health check passed')
+                    return True
+                else:
+                    self.log('debug', f'Pod {self.pod_name} health check failed')
+                    return False
+            except Exception as e:
+                self.log('debug', f'Pod {self.pod_name} health check error: {e}')
+                return False
+
+        except Exception as e:
+            self.log('warning', f'Error verifying pod health: {e}')
+            return False
+
+    async def _wait_for_pod_with_timeout(self, timeout_seconds: int = 180) -> bool:
+        """
+        Wait for pod to become ready with configurable timeout.
+
+        Args:
+            timeout_seconds: Maximum time to wait for pod readiness
+
+        Returns:
+            True if pod becomes ready, False if timeout
+        """
+        start_time = time.time()
+        last_log_time = 0
+
+        while time.time() - start_time < timeout_seconds:
+            try:
+                if await self._verify_pod_health():
+                    self.log('info', f'Pod {self.pod_name} is ready and healthy')
+                    return True
+
+                # Log progress every 10 seconds
+                current_time = time.time()
+                if current_time - last_log_time > 10:
+                    elapsed = current_time - start_time
+                    self.log('info', f'Waiting for pod {self.pod_name} to become ready... ({elapsed:.1f}s/{timeout_seconds}s)')
+                    last_log_time = current_time
+
+                await asyncio.sleep(2)
+
+            except Exception as e:
+                self.log('warning', f'Error while waiting for pod: {e}')
+                await asyncio.sleep(5)
+
+        self.log('error', f'Timeout waiting for pod {self.pod_name} to become ready after {timeout_seconds}s')
+        return False
+
+    async def _startup_cleanup(self):
+        """
+        Perform startup cleanup to handle any stale states from previous runs.
+        This should be called early in the connect process.
+        """
+        if not self._coordinator or not self._coordinator.enabled:
+            return
+
+        try:
+            pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
+            state = await self._get_pod_status_from_redis(pod_key)
+
+            if state:
+                self.log('info', f'Found existing Redis state for pod {self.pod_name}: {state.get("status")} (age: {state.get("age_human", "unknown")})')
+
+                # Check if the pod actually exists in Kubernetes
+                try:
+                    pod = self.k8s_client.read_namespaced_pod(
+                        name=self.pod_name, namespace=self._k8s_namespace
+                    )
+
+                    # Pod exists, check if state is consistent
+                    if state.get('status') == 'creating' and pod.status.phase == 'Running':
+                        # Pod was created but state wasn't updated
+                        self.log('info', f'Updating stale "creating" state to "created" for running pod')
+                        await self._coordinator.set_resource_state(pod_key, {
+                            'status': 'created',
+                            'replica_id': f"{os.getpid()}-{id(self)}",
+                            'timestamp': time.time(),
+                            'pod_name': self.pod_name
+                        }, ttl=3600)
+                    elif state.get('status') == 'failed':
+                        # Pod exists but marked as failed, clear the state
+                        self.log('info', f'Clearing "failed" state for existing pod')
+                        await self._coordinator.delete_resource_state(pod_key)
+
+                except client.rest.ApiException as e:
+                    if e.status == 404:
+                        # Pod doesn't exist but we have Redis state, clean it up
+                        self.log('info', f'Cleaning up Redis state for non-existent pod {self.pod_name}')
+                        await self._coordinator.delete_resource_state(pod_key)
+                    else:
+                        self.log('warning', f'Error checking pod existence during cleanup: {e}')
+
+        except Exception as e:
+            self.log('warning', f'Error during startup cleanup: {e}')
