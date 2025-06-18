@@ -35,6 +35,9 @@ from openhands_aci.utils.diff import get_diff
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request
+from starlette.responses import Response
 from uvicorn import run
 
 from openhands.core.exceptions import BrowserUnavailableException
@@ -782,6 +785,18 @@ if __name__ == '__main__':
         response = await call_next(request)
         return response
 
+    class InternalServerErrorMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self, request: Request, call_next: RequestResponseEndpoint
+        ) -> Response:
+            try:
+                return await call_next(request)
+            except Exception:
+                logger.exception('Unhandled exception')
+                return Response(status_code=500)
+
+    app.add_middleware(InternalServerErrorMiddleware)
+
     @app.get('/server_info')
     async def get_server_info():
         assert client is not None
@@ -1052,6 +1067,3 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f'Error listing files: {e}')
             return JSONResponse(content=[])
-
-    logger.debug(f'Starting action execution API on port {args.port}')
-    run(app, host='0.0.0.0', port=args.port)
