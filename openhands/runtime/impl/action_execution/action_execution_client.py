@@ -10,6 +10,7 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from openhands.core.config import OpenHandsConfig
+from openhands.core.logger import openhands_logger as logger
 from openhands.core.config.mcp_config import (
     MCPConfig,
     MCPSSEServerConfig,
@@ -45,15 +46,32 @@ from openhands.events.serialization.action import ACTION_TYPE_TO_CLASS
 from openhands.integrations.provider import PROVIDER_TOKEN_TYPE
 from openhands.runtime.base import Runtime
 from openhands.runtime.plugins import PluginRequirement
-from openhands.runtime.utils.request import send_request
+from openhands.runtime.utils.request import send_request, RequestHTTPError
 from openhands.utils.http_session import HttpSession
 from openhands.utils.tenacity_stop import stop_if_should_exit
 
 
 def _is_retryable_error(exception):
-    return isinstance(
-        exception, (httpx.RemoteProtocolError, httpcore.RemoteProtocolError)
-    )
+    # Retry on protocol errors (network issues)
+    if isinstance(exception, (httpx.RemoteProtocolError, httpcore.RemoteProtocolError)):
+        logger.warning(f"Network protocol error detected, will retry: {exception}")
+        return True
+
+    # Retry on connection errors (DNS/connection failures)
+    if isinstance(exception, (httpx.ConnectError, httpcore.ConnectError)):
+        logger.warning(f"Connection error detected, will retry: {exception}")
+        return True
+
+    # Retry on 5xx server errors (including 503 Service Unavailable)
+    if isinstance(exception, (httpx.HTTPStatusError, RequestHTTPError)):
+        if hasattr(exception, 'response') and exception.response:
+            status_code = exception.response.status_code
+            is_retryable = 500 <= status_code < 600
+            if is_retryable:
+                logger.warning(f"Server error {status_code} detected, will retry: {exception}")
+            return is_retryable
+
+    return False
 
 
 class ActionExecutionClient(Runtime):
@@ -100,8 +118,8 @@ class ActionExecutionClient(Runtime):
 
     @retry(
         retry=retry_if_exception(_is_retryable_error),
-        stop=stop_after_attempt(5) | stop_if_should_exit(),
-        wait=wait_exponential(multiplier=1, min=4, max=15),
+        stop=stop_after_attempt(12) | stop_if_should_exit(),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
     )
     def _send_action_server_request(
         self,
