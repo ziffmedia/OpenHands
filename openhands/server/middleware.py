@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from openhands.server import shared
 from openhands.server.types import SessionMiddlewareInterface
@@ -48,9 +48,7 @@ class LocalhostCORSMiddleware(CORSMiddleware):
             if hostname in ['localhost', '127.0.0.1']:
                 return True
 
-        # For missing origin or other origins, use the parent class's logic
-        result: bool = super().is_allowed_origin(origin)
-        return result
+        return super().is_allowed_origin(origin)
 
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
@@ -75,28 +73,26 @@ class CacheControlMiddleware(BaseHTTPMiddleware):
 
 
 class InMemoryRateLimiter:
-    history: dict[str, list[datetime]]
-    requests: int
-    seconds: int
-    sleep_seconds: int
-
-    def __init__(self, requests: int = 2, seconds: int = 1, sleep_seconds: int = 1):
+    def __init__(self, requests: int = 10, seconds: int = 1, sleep_seconds: int = 0):
         self.requests = requests
         self.seconds = seconds
         self.sleep_seconds = sleep_seconds
-        self.history = defaultdict(list)
-        self.sleep_seconds = sleep_seconds
+        self.history: dict[str, list[datetime]] = defaultdict(list)
 
-    def _clean_old_requests(self, key: str) -> None:
-        now = datetime.now()
-        cutoff = now - timedelta(seconds=self.seconds)
-        self.history[key] = [ts for ts in self.history[key] if ts > cutoff]
+    def _get_key(self, request: Request) -> str:
+        if hasattr(request, 'client') and request.client:
+            return request.client.host
+        return 'unknown'
 
     async def __call__(self, request: Request) -> bool:
-        key = request.client.host
+        key = self._get_key(request)
         now = datetime.now()
 
-        self._clean_old_requests(key)
+        # Remove old entries
+        cutoff = now - timedelta(seconds=self.seconds)
+        self.history[key] = [
+            timestamp for timestamp in self.history[key] if timestamp > cutoff
+        ]
 
         self.history[key].append(now)
 
@@ -138,74 +134,101 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return True
 
 
-class AttachConversationMiddleware(BaseHTTPMiddleware, SessionMiddlewareInterface):
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+class AttachConversationMiddleware(SessionMiddlewareInterface):
+    """
+    Raw ASGI middleware implementation to avoid ASGI protocol issues
+    that can occur with BaseHTTPMiddleware when handling complex response flows.
+    """
 
-    def _should_attach(self, request: Request) -> bool:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def _should_attach(self, scope: Scope) -> tuple[bool, str]:
         """
         Determine if the middleware should attach a session for the given request.
+        Returns (should_attach, conversation_id)
         """
-        if request.method == 'OPTIONS':
-            return False
+        if scope["type"] != "http":
+            return False, ""
 
-        conversation_id = ''
-        if request.url.path.startswith('/api/conversation'):
-            # FIXME: we should be able to use path_params
-            path_parts = request.url.path.split('/')
+        method = scope.get("method", "")
+        if method == "OPTIONS":
+            return False, ""
+
+        path = scope.get("path", "")
+        conversation_id = ""
+
+        if path.startswith('/api/conversation'):
+            path_parts = path.split('/')
             if len(path_parts) > 4:
-                conversation_id = request.url.path.split('/')[3]
+                conversation_id = path_parts[3]
+
         if not conversation_id:
-            return False
+            return False, ""
 
-        request.state.sid = conversation_id
+        return True, conversation_id
 
-        return True
-
-    async def _attach_conversation(self, request: Request) -> JSONResponse | None:
+    async def _attach_conversation(self, scope: Scope, conversation_id: str) -> tuple[bool, dict]:
         """
         Attach the user's session based on the provided authentication token.
+        Returns (success, error_response_dict)
         """
-        user_id = await get_user_id(request)
-        request.state.conversation = (
-            await shared.conversation_manager.attach_to_conversation(
-                request.state.sid, user_id
-            )
-        )
-        if not request.state.conversation:
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={'error': 'Session not found'},
-            )
-        return None
+        try:
+            # Create a minimal request object for user_id extraction
+            request = Request(scope)
+            user_id = await get_user_id(request)
 
-    async def _detach_session(self, request: Request) -> None:
+            conversation = await shared.conversation_manager.attach_to_conversation(
+                conversation_id, user_id
+            )
+
+            if not conversation:
+                return False, {
+                    'status_code': status.HTTP_404_NOT_FOUND,
+                    'content': {'error': 'Session not found'}
+                }
+
+            scope['conversation'] = conversation
+            scope['conversation_id'] = conversation_id
+            return True, {}
+
+        except Exception as e:
+            return False, {
+                'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                'content': {'error': f'Failed to attach conversation: {str(e)}'}
+            }
+
+    async def _detach_conversation(self, scope: Scope) -> None:
         """
         Detach the user's session.
         """
-        if hasattr(request.state, 'conversation') and request.state.conversation:
-            await shared.conversation_manager.detach_from_conversation(
-                request.state.conversation
-            )
+        try:
+            conversation = scope.get('conversation')
+            if conversation:
+                await shared.conversation_manager.detach_from_conversation(conversation)
+        except Exception:
+            # Silently ignore detachment errors to avoid secondary failures
+            pass
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        if not self._should_attach(request):
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        should_attach, conversation_id = self._should_attach(scope)
+
+        if not should_attach:
+            await self.app(scope, receive, send)
+            return
+
+        success, error_response = await self._attach_conversation(scope, conversation_id)
+
+        if not success:
+            # Send error response directly
+            response = JSONResponse(**error_response)
+            await response(scope, receive, send)
+            return
 
         try:
-            response = await self._attach_conversation(request)
-            if response:
-                return response
-
-            # Continue processing the request
-            response = await call_next(request)
-            return response
+            await self.app(scope, receive, send)
         except Exception:
-            # If there's an exception, still try to detach the session if it was set
-            await self._detach_session(request)
+            await self._detach_conversation(scope)
             raise
         finally:
-            # Ensure the session is detached
-            await self._detach_session(request)
+            await self._detach_conversation(scope)
