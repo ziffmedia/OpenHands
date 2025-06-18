@@ -93,3 +93,28 @@ def test_kubernetes_config_annotations():
     k8s_config = KubernetesConfig(annotations={'test.io/label': 'value'})
     sandbox_config = SandboxConfig(kubernetes=k8s_config)
     assert sandbox_config.kubernetes.annotations == {'test.io/label': 'value'}
+
+
+def test_kubernetes_config_configmap_volumes():
+    """Test that KubernetesConfig properly handles configmap volumes."""
+    # Test default (no configmap volumes)
+    config = KubernetesConfig()
+    assert config.configmap_volumes is None
+
+    # Test single configmap volume with key (subPath)
+    config = KubernetesConfig(configmap_volumes='ca-certs:ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro')
+    assert config.configmap_volumes == 'ca-certs:ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro'
+
+    # Test single configmap volume as directory
+    config = KubernetesConfig(configmap_volumes='my-config:/app/config')
+    assert config.configmap_volumes == 'my-config:/app/config'
+
+    # Test multiple configmap volumes
+    multiple_volumes = 'ca-certs:ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro,my-config:/app/config'
+    config = KubernetesConfig(configmap_volumes=multiple_volumes)
+    assert config.configmap_volumes == multiple_volumes
+
+    # Test configmap volumes in SandboxConfig
+    k8s_config = KubernetesConfig(configmap_volumes='test-cm:test-key:/test/path')
+    sandbox_config = SandboxConfig(kubernetes=k8s_config)
+    assert sandbox_config.kubernetes.configmap_volumes == 'test-cm:test-key:/test/path'

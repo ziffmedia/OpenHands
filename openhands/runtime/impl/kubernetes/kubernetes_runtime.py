@@ -11,6 +11,7 @@ from kubernetes import client, config
 from kubernetes.client.models import (
     V1Container,
     V1ContainerPort,
+    V1ConfigMapVolumeSource,
     V1EnvVar,
     V1HTTPIngressPath,
     V1HTTPIngressRuleValue,
@@ -645,6 +646,67 @@ class KubernetesRuntime(ActionExecutionClient):
                 ),
             )
         ]
+
+        # Process configmap volumes if configured
+        if self._k8s_config.configmap_volumes:
+            configmap_mounts = self._k8s_config.configmap_volumes.split(',')
+            for mount in configmap_mounts:
+                parts = mount.strip().split(':')
+                if len(parts) >= 2:
+                    # Support two formats:
+                    # 1. configmap_name:mount_path[:mode] - mounts entire configmap as directory
+                    # 2. configmap_name:key:mount_path[:mode] - mounts specific key as file using subPath
+
+                    if len(parts) == 2 or (len(parts) == 3 and parts[2].strip() in ['ro', 'rw']):
+                        # Format 1: configmap_name:mount_path[:mode]
+                        configmap_name = parts[0].strip()
+                        mount_path = parts[1].strip()
+                        mount_mode = parts[2].strip() if len(parts) == 3 else None
+                        sub_path = None
+                        key = None
+                    elif len(parts) >= 3:
+                        # Format 2: configmap_name:key:mount_path[:mode]
+                        configmap_name = parts[0].strip()
+                        key = parts[1].strip()
+                        mount_path = parts[2].strip()
+                        mount_mode = parts[3].strip() if len(parts) == 4 else None
+                        sub_path = key
+                    else:
+                        logger.warning(f'Invalid configmap volume format: {mount}. Expected format: "configmap_name:mount_path[:mode]" or "configmap_name:key:mount_path[:mode]"')
+                        continue
+
+                    # Generate unique volume name
+                    volume_name = f'configmap-{configmap_name.replace("_", "-")}'
+                    if key:
+                        volume_name += f'-{key.replace(".", "-").replace("_", "-")}'
+
+                    # Add volume mount
+                    volume_mount = V1VolumeMount(
+                        name=volume_name,
+                        mount_path=mount_path,
+                        read_only=True if mount_mode == 'ro' else None,
+                    )
+                    if sub_path:
+                        volume_mount.sub_path = sub_path
+
+                    volume_mounts.append(volume_mount)
+
+                    # Add volume
+                    volumes.append(
+                        V1Volume(
+                            name=volume_name,
+                            config_map=V1ConfigMapVolumeSource(
+                                name=configmap_name
+                            ),
+                        )
+                    )
+
+                    if sub_path:
+                        logger.debug(f'ConfigMap volume mount: {configmap_name}:{key} to {mount_path} (subPath)')
+                    else:
+                        logger.debug(f'ConfigMap volume mount: {configmap_name} to {mount_path} (directory)')
+                else:
+                    logger.warning(f'Invalid configmap volume format: {mount}. Expected format: "configmap_name:mount_path[:mode]" or "configmap_name:key:mount_path[:mode]"')
 
         # Prepare container ports
         container_ports = [
@@ -1822,19 +1884,19 @@ class KubernetesRuntime(ActionExecutionClient):
     def _schedule_delayed_cleanup(self, delay_seconds: int):
         """
         Schedule delayed cleanup of Kubernetes resources after WebSocket disconnection.
-        
+
         Args:
             delay_seconds: Number of seconds to wait before cleanup
         """
         global _delayed_cleanup_tasks
-        
+
         # Cancel any existing delayed cleanup for this pod
         self._cancel_delayed_cleanup()
-        
+
         # Schedule new delayed cleanup
         pod_key = self.pod_name
         self.log('info', f'Scheduling delayed cleanup for pod {self.pod_name} in {delay_seconds} seconds')
-        
+
         # Create async task for delayed cleanup
         task = asyncio.create_task(self._execute_delayed_cleanup(delay_seconds))
         _delayed_cleanup_tasks[pod_key] = task
@@ -1844,7 +1906,7 @@ class KubernetesRuntime(ActionExecutionClient):
         Cancel any pending delayed cleanup for this pod.
         """
         global _delayed_cleanup_tasks
-        
+
         pod_key = self.pod_name
         if pod_key in _delayed_cleanup_tasks:
             task = _delayed_cleanup_tasks[pod_key]
@@ -1856,28 +1918,28 @@ class KubernetesRuntime(ActionExecutionClient):
     async def _execute_delayed_cleanup(self, delay_seconds: int):
         """
         Execute delayed cleanup after waiting for the specified delay.
-        
+
         Args:
             delay_seconds: Number of seconds to wait before cleanup
         """
         global _delayed_cleanup_tasks
-        
+
         try:
             # Wait for the specified delay
             await asyncio.sleep(delay_seconds)
-            
+
             # Check if there are still no active replicas after the delay
             if self._coordinator and self._coordinator.enabled:
                 pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
                 active_replicas = await self._get_active_replica_count(pod_key)
-                
+
                 if active_replicas > 0:
                     self.log('info', f'Pod {self.pod_name} has {active_replicas} active replicas, skipping cleanup')
                     return
-                
+
                 # Clean up Redis state
                 await self._coordinator.delete_resource_state(pod_key)
-            
+
             # Clean up Kubernetes resources
             self.log('info', f'Executing delayed cleanup for pod {self.pod_name} after {delay_seconds}s delay')
             try:
@@ -1889,7 +1951,7 @@ class KubernetesRuntime(ActionExecutionClient):
                 self.log('info', f'Successfully completed delayed cleanup for pod {self.pod_name}')
             except Exception as e:
                 self.log('error', f'Error during delayed cleanup for pod {self.pod_name}: {e}')
-                
+
         except asyncio.CancelledError:
             self.log('info', f'Delayed cleanup for pod {self.pod_name} was cancelled')
             raise

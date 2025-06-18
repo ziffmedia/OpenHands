@@ -382,6 +382,17 @@ classpath = "my_package.my_module.MyCustomAgent"
 # "app.kubernetes.io/version" = "1.0.0"
 # "custom.annotation/value" = "test-value"
 
+# ConfigMap volume mounts for mounting configmaps as volumes
+# Format: "configmap_name:mount_path[:mode]" for entire configmap as directory
+# Format: "configmap_name:key:mount_path[:mode]" for specific key as file (uses subPath)
+# Multiple mounts can be specified using commas
+# Example for mounting CA certificates as a file:
+#configmap_volumes = "ca-certs:ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro"
+# Example for mounting entire configmap as directory:
+#configmap_volumes = "my-config:/app/config"
+# Multiple ConfigMaps example:
+#configmap_volumes = "ca-certs:ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro,my-config:/app/config"
+
 # Redis coordination settings for multi-replica deployments
 # Enable Redis coordination to prevent race conditions when multiple replicas try to create the same pod
 #redis_coordination_enabled = true

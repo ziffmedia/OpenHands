@@ -18,6 +18,7 @@ class KubernetesConfig(BaseModel):
         node_selector_val: Optional node selector value for pod scheduling
         tolerations_yaml: Optional YAML string defining pod tolerations
         annotations: Custom annotations to add to the runtime pod
+        configmap_volumes: ConfigMap volume mounts for mounting configmaps as volumes
     """
 
     namespace: str = Field(
@@ -114,6 +115,10 @@ class KubernetesConfig(BaseModel):
     websocket_disconnect_delay: int = Field(
         default=3600,
         description='Delay in seconds before cleaning up pods after WebSocket disconnection (default: 1 hour)',
+    )
+    configmap_volumes: str | None = Field(
+        default=None,
+        description='ConfigMap volume mounts in the format "configmap_name:mount_path[:mode]" or "configmap_name:key:mount_path[:mode]" for specific keys. Multiple mounts can be specified using commas, e.g. "ca-certs:ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro,my-config:/app/config"',
     )
 
     model_config = {'extra': 'forbid'}

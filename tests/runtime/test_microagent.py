@@ -14,6 +14,7 @@ from openhands.core.config import MCPConfig
 from openhands.core.config.mcp_config import MCPStdioServerConfig
 from openhands.mcp.utils import add_mcp_tools_to_agent
 from openhands.microagent import KnowledgeMicroagent, RepoMicroagent
+from openhands.utils.async_utils import call_async_from_sync
 
 
 def _create_test_microagents(test_dir: str):
@@ -71,7 +72,7 @@ def test_load_microagents_with_trailing_slashes(
     runtime, config = _load_runtime(temp_dir, runtime_cls, run_as_openhands)
     try:
         # Load microagents
-        loaded_agents = runtime.get_microagents_from_selected_repo(None)
+        loaded_agents = call_async_from_sync(runtime.get_microagents_from_selected_repo, None)
 
         # Verify all agents are loaded
         knowledge_agents = [
