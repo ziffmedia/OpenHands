@@ -60,6 +60,9 @@ from openhands.utils.redis_coordination import get_coordinator
 POD_NAME_PREFIX = 'openhands-runtime-'
 POD_LABEL = 'openhands-runtime'
 
+# Class-level dictionary to track delayed cleanup tasks for each pod
+_delayed_cleanup_tasks: dict[str, asyncio.Task] = {}
+
 
 class KubernetesRuntime(ActionExecutionClient):
     """
@@ -228,6 +231,9 @@ class KubernetesRuntime(ActionExecutionClient):
         # Initialize Redis coordinator for multi-replica coordination
         if self._coordinator is None:
             self._coordinator = await get_coordinator()
+
+        # Cancel any pending delayed cleanup for this pod
+        self._cancel_delayed_cleanup()
 
         # Use Redis coordination to prevent race conditions between replicas
         pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"        # Perform startup cleanup to handle stale states
@@ -946,17 +952,10 @@ class KubernetesRuntime(ActionExecutionClient):
                 active_replicas = call_sync_from_async(self._get_active_replica_count)(pod_key)
 
                 if active_replicas == 0:
-                    self.log('info', f'No other replicas connected to pod {self.pod_name}, cleaning up')
-                    # No other replicas connected, safe to clean up the pod
-                    call_sync_from_async(self._coordinator.delete_resource_state)(pod_key)
-                    try:
-                        self._cleanup_k8s_resources(
-                            namespace=self._k8s_namespace,
-                            remove_pvc=False,
-                            conversation_id=self.sid,
-                        )
-                    except Exception as e:
-                        self.log('error', f'Error cleaning up pod resources: {e}')
+                    # No other replicas connected - schedule delayed cleanup instead of immediate cleanup
+                    delay_seconds = getattr(self._k8s_config, 'websocket_disconnect_delay', 3600)
+                    self.log('info', f'No other replicas connected to pod {self.pod_name}, scheduling cleanup in {delay_seconds}s')
+                    self._schedule_delayed_cleanup(delay_seconds)
                 else:
                     self.log('info', f'Replica disconnecting from pod {self.pod_name}, but {active_replicas} other replicas still connected')
 
@@ -1819,3 +1818,84 @@ class KubernetesRuntime(ActionExecutionClient):
 
         except Exception as e:
             self.log('warning', f'Failed to maintain replica heartbeat: {e}')
+
+    def _schedule_delayed_cleanup(self, delay_seconds: int):
+        """
+        Schedule delayed cleanup of Kubernetes resources after WebSocket disconnection.
+        
+        Args:
+            delay_seconds: Number of seconds to wait before cleanup
+        """
+        global _delayed_cleanup_tasks
+        
+        # Cancel any existing delayed cleanup for this pod
+        self._cancel_delayed_cleanup()
+        
+        # Schedule new delayed cleanup
+        pod_key = self.pod_name
+        self.log('info', f'Scheduling delayed cleanup for pod {self.pod_name} in {delay_seconds} seconds')
+        
+        # Create async task for delayed cleanup
+        task = asyncio.create_task(self._execute_delayed_cleanup(delay_seconds))
+        _delayed_cleanup_tasks[pod_key] = task
+
+    def _cancel_delayed_cleanup(self):
+        """
+        Cancel any pending delayed cleanup for this pod.
+        """
+        global _delayed_cleanup_tasks
+        
+        pod_key = self.pod_name
+        if pod_key in _delayed_cleanup_tasks:
+            task = _delayed_cleanup_tasks[pod_key]
+            if not task.done():
+                task.cancel()
+                self.log('info', f'Cancelled delayed cleanup for pod {self.pod_name}')
+            del _delayed_cleanup_tasks[pod_key]
+
+    async def _execute_delayed_cleanup(self, delay_seconds: int):
+        """
+        Execute delayed cleanup after waiting for the specified delay.
+        
+        Args:
+            delay_seconds: Number of seconds to wait before cleanup
+        """
+        global _delayed_cleanup_tasks
+        
+        try:
+            # Wait for the specified delay
+            await asyncio.sleep(delay_seconds)
+            
+            # Check if there are still no active replicas after the delay
+            if self._coordinator and self._coordinator.enabled:
+                pod_key = f"k8s-pod:{self._k8s_namespace}:{self.pod_name}"
+                active_replicas = await self._get_active_replica_count(pod_key)
+                
+                if active_replicas > 0:
+                    self.log('info', f'Pod {self.pod_name} has {active_replicas} active replicas, skipping cleanup')
+                    return
+                
+                # Clean up Redis state
+                await self._coordinator.delete_resource_state(pod_key)
+            
+            # Clean up Kubernetes resources
+            self.log('info', f'Executing delayed cleanup for pod {self.pod_name} after {delay_seconds}s delay')
+            try:
+                self._cleanup_k8s_resources(
+                    namespace=self._k8s_namespace,
+                    remove_pvc=False,
+                    conversation_id=self.sid,
+                )
+                self.log('info', f'Successfully completed delayed cleanup for pod {self.pod_name}')
+            except Exception as e:
+                self.log('error', f'Error during delayed cleanup for pod {self.pod_name}: {e}')
+                
+        except asyncio.CancelledError:
+            self.log('info', f'Delayed cleanup for pod {self.pod_name} was cancelled')
+            raise
+        except Exception as e:
+            self.log('error', f'Unexpected error during delayed cleanup for pod {self.pod_name}: {e}')
+        finally:
+            # Remove task from global tracking
+            if self.pod_name in _delayed_cleanup_tasks:
+                del _delayed_cleanup_tasks[self.pod_name]

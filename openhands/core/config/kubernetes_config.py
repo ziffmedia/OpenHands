@@ -111,5 +111,9 @@ class KubernetesConfig(BaseModel):
         default=3600,
         description='Age threshold in seconds for automatic pod cleanup (default: 1 hour)',
     )
+    websocket_disconnect_delay: int = Field(
+        default=3600,
+        description='Delay in seconds before cleaning up pods after WebSocket disconnection (default: 1 hour)',
+    )
 
     model_config = {'extra': 'forbid'}
