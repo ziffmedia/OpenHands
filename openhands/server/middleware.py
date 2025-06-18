@@ -138,9 +138,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return True
 
 
-class AttachConversationMiddleware(SessionMiddlewareInterface):
+class AttachConversationMiddleware(BaseHTTPMiddleware, SessionMiddlewareInterface):
     def __init__(self, app: ASGIApp) -> None:
-        self.app = app
+        super().__init__(app)
 
     def _should_attach(self, request: Request) -> bool:
         """
@@ -183,25 +183,29 @@ class AttachConversationMiddleware(SessionMiddlewareInterface):
         """
         Detach the user's session.
         """
-        await shared.conversation_manager.detach_from_conversation(
-            request.state.conversation
-        )
+        if hasattr(request.state, 'conversation') and request.state.conversation:
+            await shared.conversation_manager.detach_from_conversation(
+                request.state.conversation
+            )
 
-    async def __call__(
+    async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         if not self._should_attach(request):
             return await call_next(request)
 
-        response = await self._attach_conversation(request)
-        if response:
-            return response
-
         try:
+            response = await self._attach_conversation(request)
+            if response:
+                return response
+
             # Continue processing the request
             response = await call_next(request)
+            return response
+        except Exception:
+            # If there's an exception, still try to detach the session if it was set
+            await self._detach_session(request)
+            raise
         finally:
             # Ensure the session is detached
             await self._detach_session(request)
-
-        return response
