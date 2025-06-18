@@ -397,14 +397,21 @@ class StandaloneConversationManager(ConversationManager):
         settings: Settings,
     ) -> Callable:
         def callback(event, *args, **kwargs):
-            call_async_from_sync(
-                self._update_conversation_for_event,
-                GENERAL_TIMEOUT,
-                user_id,
-                conversation_id,
-                settings,
-                event,
-            )
+            try:
+                call_async_from_sync(
+                    self._update_conversation_for_event,
+                    GENERAL_TIMEOUT,
+                    user_id,
+                    conversation_id,
+                    settings,
+                    event,
+                )
+            except Exception as e:
+                logger.error(
+                    f'Failed to update conversation metadata for {conversation_id}: {e}',
+                    extra={'conversation_id': conversation_id, 'user_id': user_id}
+                )
+                # Don't re-raise to prevent callback chain from being disrupted
 
         return callback
 

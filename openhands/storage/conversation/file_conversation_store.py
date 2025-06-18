@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,19 +37,55 @@ class FileConversationStore(ConversationStore):
 
     async def get_metadata(self, conversation_id: str) -> ConversationMetadata:
         path = self.get_conversation_metadata_filename(conversation_id)
-        json_str = await call_sync_from_async(self.file_store.read, path)
+        
+        # Retry logic to handle race conditions where file might be empty temporarily
+        max_retries = 3
+        retry_delay = 0.1  # 100ms
+        
+        for attempt in range(max_retries + 1):
+            try:
+                json_str = await call_sync_from_async(self.file_store.read, path)
+                
+                # Check if file is empty (race condition case)
+                if not json_str.strip():
+                    if attempt < max_retries:
+                        logger.warning(f'Empty metadata file detected for conversation {conversation_id}, retrying...')
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        raise FileNotFoundError(f'Metadata file is empty after {max_retries} retries: {path}')
+                
+                # Validate the JSON
+                try:
+                    json_obj = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    if attempt < max_retries:
+                        logger.warning(f'Invalid JSON in metadata file for conversation {conversation_id}, retrying: {e}')
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        raise FileNotFoundError(f'Invalid JSON in metadata file after {max_retries} retries: {path}') from e
+                
+                if 'created_at' not in json_obj:
+                    raise FileNotFoundError(path)
 
-        # Validate the JSON
-        json_obj = json.loads(json_str)
-        if 'created_at' not in json_obj:
-            raise FileNotFoundError(path)
+                # Remove github_user_id if it exists
+                if 'github_user_id' in json_obj:
+                    json_obj.pop('github_user_id')
 
-        # Remove github_user_id if it exists
-        if 'github_user_id' in json_obj:
-            json_obj.pop('github_user_id')
-
-        result = conversation_metadata_type_adapter.validate_python(json_obj)
-        return result
+                result = conversation_metadata_type_adapter.validate_python(json_obj)
+                return result
+                
+            except FileNotFoundError:
+                # Don't retry for genuine file not found errors
+                raise
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f'Error reading metadata file for conversation {conversation_id}, retrying: {e}')
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    raise
 
     async def delete_metadata(self, conversation_id: str) -> None:
         path = str(

@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 
 from openhands.core.logger import openhands_logger as logger
 from openhands.storage.files import FileStore
@@ -20,9 +21,21 @@ class LocalFileStore(FileStore):
     def write(self, path: str, contents: str | bytes) -> None:
         full_path = self.get_full_path(path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        
+        # Use atomic write: write to temporary file first, then rename
+        # This prevents race conditions where readers see empty/partial files
         mode = 'w' if isinstance(contents, str) else 'wb'
-        with open(full_path, mode) as f:
-            f.write(contents)
+        dir_path = os.path.dirname(full_path)
+        
+        # Create temporary file in the same directory to ensure atomic rename works
+        with tempfile.NamedTemporaryFile(mode=mode, dir=dir_path, delete=False) as temp_file:
+            temp_path = temp_file.name
+            temp_file.write(contents)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())  # Force write to disk
+        
+        # Atomic rename - this is the key to preventing race conditions
+        os.rename(temp_path, full_path)
 
     def read(self, path: str) -> str:
         full_path = self.get_full_path(path)

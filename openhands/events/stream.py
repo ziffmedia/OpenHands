@@ -261,7 +261,9 @@ class EventStream(EventStore):
                 logger.error(
                     f'Error in event callback {callback_id} for subscriber {subscriber_id}: {str(e)}',
                 )
-                # Re-raise in the main thread so the error is not swallowed
-                raise e
+                # Don't re-raise exceptions from callbacks to prevent pod termination
+                # The callback failure should be logged but not crash the entire process
+                # Re-raising in the main thread can cause the application to crash
+                # especially in Kubernetes environments where this leads to pod restarts
 
         return _handle_callback_error
