@@ -62,6 +62,11 @@ def _is_retryable_error(exception):
         logger.warning(f"Connection error detected, will retry: {exception}")
         return True
 
+    # Retry on timeout errors (read/write timeouts)
+    if isinstance(exception, (httpx.TimeoutException, httpcore.ReadTimeout, httpcore.WriteTimeout, httpcore.PoolTimeout)):
+        logger.warning(f"Timeout error detected, will retry: {exception}")
+        return True
+
     # Retry on 5xx server errors (including 503 Service Unavailable)
     if isinstance(exception, (httpx.HTTPStatusError, RequestHTTPError)):
         if hasattr(exception, 'response') and exception.response:
@@ -416,7 +421,7 @@ class ActionExecutionClient(Runtime):
                 'POST',
                 f'{self.action_execution_server_url}/update_mcp_server',
                 json=stdio_tools,
-                timeout=10,
+                timeout=30,  # Increased timeout for MCP server initialization
             )
             result = response.json()
             if response.status_code != 200:
