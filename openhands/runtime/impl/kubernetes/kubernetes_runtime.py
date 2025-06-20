@@ -83,8 +83,6 @@ class KubernetesRuntime(ActionExecutionClient):
         headless_mode (bool, optional): Whether to run in headless mode. Defaults to True.
     """
 
-    _shutdown_listener_id: UUID | None = None
-    _namespace: str = ''
     _coordinator = None
 
     def __init__(
@@ -98,14 +96,8 @@ class KubernetesRuntime(ActionExecutionClient):
         attach_to_existing: bool = False,
         headless_mode: bool = True,
     ):
-        if not KubernetesRuntime._shutdown_listener_id:
-            KubernetesRuntime._shutdown_listener_id = add_shutdown_listener(
-                lambda: KubernetesRuntime._cleanup_k8s_resources(
-                    namespace=self._k8s_namespace,
-                    remove_pvc=True,
-                    conversation_id=self.sid,
-                )  # this is when you ctrl+c.
-            )
+        self._shutdown_listener_id: UUID | None = None
+
         self.config = config
         self._runtime_initialized: bool = False
         self.status_callback = status_callback
@@ -119,7 +111,13 @@ class KubernetesRuntime(ActionExecutionClient):
 
         self._k8s_config = self.config.sandbox.kubernetes
         self._k8s_namespace = self._k8s_config.namespace
-        KubernetesRuntime._namespace = self._k8s_namespace
+        self._shutdown_listener_id = add_shutdown_listener(
+            lambda: KubernetesRuntime._cleanup_k8s_resources(
+                namespace=self._k8s_namespace,
+                remove_pvc=True,
+                conversation_id=self.sid,
+            )
+        )
 
         # Initialize ports with default values in the required range
         self._container_port = 8080  # Default internal container port
