@@ -1035,14 +1035,10 @@ class KubernetesRuntime(ActionExecutionClient):
             )
             return
 
-        try:
-            self._cleanup_k8s_resources(
-                namespace=self._k8s_namespace,
-                remove_pvc=False,
-                conversation_id=self.sid,
-            )
-        except Exception as e:
-            self.log('error', f'Error closing runtime: {e}')
+        # Schedule delayed cleanup if Redis coordination is disabled
+        delay_seconds = getattr(self._k8s_config, 'websocket_disconnect_delay', 3600)
+        self.log('info', f'Redis coordination disabled, scheduling cleanup in {delay_seconds}s')
+        self._schedule_delayed_cleanup(delay_seconds)
 
     @property
     def ingress_domain(self) -> str:
