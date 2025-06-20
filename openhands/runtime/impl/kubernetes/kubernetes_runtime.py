@@ -279,45 +279,6 @@ class KubernetesRuntime(ActionExecutionClient):
 
         if not self.attach_to_existing:
             self.log('info', 'Runtime is ready.')
-
-        if not self.attach_to_existing:
-            await call_sync_from_async(self.setup_initial_env)
-
-        self.log(
-            'info',
-            f'Pod initialized with plugins: {[plugin.name for plugin in self.plugins]}. VSCode URL: {self.vscode_url}',
-        )
-        if not self.attach_to_existing:
-            self.send_status_message(' ')
-        self._runtime_initialized = True
-
-        if DEBUG_RUNTIME:
-            # Log streamer for kubernetes pods
-            # This is a simplified version that just uses the pod name
-            self.log_streamer = LogStreamer(self.pod_name, self.log)
-        else:
-            self.log_streamer = None
-
-        if not self.attach_to_existing:
-            self.log('info', 'Waiting for pod to become ready ...')
-            self.send_status_message('STATUS$WAITING_FOR_CLIENT')
-
-        try:
-            await call_sync_from_async(self._wait_until_ready)
-        except Exception as alive_error:
-            self.log('error', f'Failed to connect to runtime: {alive_error}')
-            self.send_error_message(
-                'ERROR$RUNTIME_CONNECTION',
-                f'Failed to connect to runtime: {alive_error}',
-            )
-            raise AgentRuntimeDisconnectedError(
-                f'Failed to connect to runtime: {alive_error}'
-            ) from alive_error
-
-        if not self.attach_to_existing:
-            self.log('info', 'Runtime is ready.')
-
-        if not self.attach_to_existing:
             await call_sync_from_async(self.setup_initial_env)
 
         self.log(
