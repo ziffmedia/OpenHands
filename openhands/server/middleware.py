@@ -250,27 +250,53 @@ class AttachConversationMiddleware(SessionMiddlewareInterface):
             request = Request(scope)
             user_id = await get_user_id(request)
 
-            conversation = await shared.conversation_manager.attach_to_conversation(
-                conversation_id, user_id
-            )
+            # For DockerNestedConversationManager and KubernetesNestedConversationManager, 
+            # attach_to_conversation is not supported
+            # Instead, we need to check if the conversation exists without attaching
+            from openhands.server.conversation_manager.docker_nested_conversation_manager import DockerNestedConversationManager
+            from openhands.server.conversation_manager.kubernetes_nested_conversation_manager import KubernetesNestedConversationManager
 
-            if not conversation:
-                return False, {
-                    'status_code': status.HTTP_404_NOT_FOUND,
-                    'content': {'error': 'Session not found'}
-                }
+            if isinstance(shared.conversation_manager, (DockerNestedConversationManager, KubernetesNestedConversationManager)):
+                # For nested conversation managers, we need to ensure the container/pod is running
+                # when a conversation is opened
+                from openhands.core.config import OpenHandsConfig
 
-            # Initialize state if it doesn't exist
-            if 'state' not in scope:
-                scope['state'] = {}
+                try:
+                    # We need some basic settings to start the agent loop
+                    # Create minimal settings to start the conversation
+                    from openhands.storage.data_models.settings import Settings
+                    config = shared.config if hasattr(shared, 'config') else OpenHandsConfig()
+                    settings = Settings(agent=config.default_agent)
 
-            # Store conversation in scope state so it can be accessed via request.state.conversation
-            scope['state']['conversation'] = conversation
-            scope['state']['conversation_id'] = conversation_id
+                    await shared.conversation_manager.maybe_start_agent_loop(
+                        conversation_id, settings, user_id
+                    )
+                except Exception as e:
+                    # If we can't start the agent loop, log but don't fail the request
+                    # The user might be trying to access a conversation that doesn't exist yet
+                    pass
+            else:
+                conversation = await shared.conversation_manager.attach_to_conversation(
+                    conversation_id, user_id
+                )
 
-            # Also store in scope for backwards compatibility
-            scope['conversation'] = conversation
-            scope['conversation_id'] = conversation_id
+                if not conversation:
+                    return False, {
+                        'status_code': status.HTTP_404_NOT_FOUND,
+                        'content': {'error': 'Session not found'}
+                    }
+
+                # Initialize state if it doesn't exist
+                if 'state' not in scope:
+                    scope['state'] = {}
+
+                # Store conversation in scope state so it can be accessed via request.state.conversation
+                scope['state']['conversation'] = conversation
+                scope['state']['conversation_id'] = conversation_id
+
+                # Also store in scope for backwards compatibility
+                scope['conversation'] = conversation
+                scope['conversation_id'] = conversation_id
             return True, {}
 
         except Exception as e:
@@ -287,7 +313,15 @@ class AttachConversationMiddleware(SessionMiddlewareInterface):
             # Try to get conversation from either location
             conversation = scope.get('conversation') or (scope.get('state', {}).get('conversation') if scope.get('state') else None)
             if conversation:
-                await shared.conversation_manager.detach_from_conversation(conversation)
+                from openhands.server.conversation_manager.docker_nested_conversation_manager import DockerNestedConversationManager
+                from openhands.server.conversation_manager.kubernetes_nested_conversation_manager import KubernetesNestedConversationManager
+
+                if isinstance(shared.conversation_manager, (DockerNestedConversationManager, KubernetesNestedConversationManager)):
+                    # Skip detachment for nested conversation managers
+                    # The container/pod lifecycle is managed separately
+                    pass
+                else:
+                    await shared.conversation_manager.detach_from_conversation(conversation)
         except Exception:
             # Silently ignore detachment errors to avoid secondary failures
             pass
