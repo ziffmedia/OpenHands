@@ -8,6 +8,7 @@ import tenacity
 import time
 import yaml
 from kubernetes import client, config
+from openhands.core.shutdown_manager import remove_shutdown_listener
 from kubernetes.client.models import (
     V1Container,
     V1ContainerPort,
@@ -1900,9 +1901,14 @@ class KubernetesRuntime(ActionExecutionClient):
             try:
                 self._cleanup_k8s_resources(
                     namespace=self._k8s_namespace,
-                    remove_pvc=False,
+                    remove_pvc=True,
                     conversation_id=self.sid,
                 )
+
+                if self._shutdown_listener_id:
+                    remove_shutdown_listener(self._shutdown_listener_id)
+                    self._shutdown_listener_id = None # Clear the ID after removal
+
                 self.log('info', f'Successfully completed delayed cleanup for pod {self.pod_name}')
             except Exception as e:
                 self.log('error', f'Error during delayed cleanup for pod {self.pod_name}: {e}')
