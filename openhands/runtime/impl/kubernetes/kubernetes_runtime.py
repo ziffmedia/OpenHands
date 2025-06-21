@@ -8,7 +8,7 @@ import tenacity
 import time
 import yaml
 from kubernetes import client, config
-from openhands.core.shutdown_manager import remove_shutdown_listener
+from openhands.core.shutdown_manager import remove_shutdown_listener, add_shutdown_listener
 from kubernetes.client.models import (
     V1Container,
     V1ContainerPort,
@@ -55,7 +55,7 @@ from openhands.runtime.plugins import PluginRequirement
 from openhands.runtime.utils.command import get_action_execution_server_startup_command
 from openhands.runtime.utils.log_streamer import LogStreamer
 from openhands.utils.async_utils import call_sync_from_async
-from openhands.utils.shutdown_listener import add_shutdown_listener
+
 from openhands.utils.tenacity_stop import stop_if_should_exit
 from openhands.utils.redis_coordination import get_coordinator
 
