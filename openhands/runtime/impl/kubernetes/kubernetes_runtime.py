@@ -8,6 +8,7 @@ import tenacity
 import time
 import yaml
 from kubernetes import client, config
+from openhands.core.shutdown_manager import remove_shutdown_listener, add_shutdown_listener
 from kubernetes.client.models import (
     V1Container,
     V1ContainerPort,
@@ -54,7 +55,7 @@ from openhands.runtime.plugins import PluginRequirement
 from openhands.runtime.utils.command import get_action_execution_server_startup_command
 from openhands.runtime.utils.log_streamer import LogStreamer
 from openhands.utils.async_utils import call_sync_from_async
-from openhands.utils.shutdown_listener import add_shutdown_listener
+
 from openhands.utils.tenacity_stop import stop_if_should_exit
 from openhands.utils.redis_coordination import get_coordinator
 
@@ -83,8 +84,6 @@ class KubernetesRuntime(ActionExecutionClient):
         headless_mode (bool, optional): Whether to run in headless mode. Defaults to True.
     """
 
-    _shutdown_listener_id: UUID | None = None
-    _namespace: str = ''
     _coordinator = None
 
     def __init__(
@@ -98,14 +97,8 @@ class KubernetesRuntime(ActionExecutionClient):
         attach_to_existing: bool = False,
         headless_mode: bool = True,
     ):
-        if not KubernetesRuntime._shutdown_listener_id:
-            KubernetesRuntime._shutdown_listener_id = add_shutdown_listener(
-                lambda: KubernetesRuntime._cleanup_k8s_resources(
-                    namespace=self._k8s_namespace,
-                    remove_pvc=True,
-                    conversation_id=self.sid,
-                )  # this is when you ctrl+c.
-            )
+        self._shutdown_listener_id: UUID | None = None
+
         self.config = config
         self._runtime_initialized: bool = False
         self.status_callback = status_callback
@@ -119,7 +112,13 @@ class KubernetesRuntime(ActionExecutionClient):
 
         self._k8s_config = self.config.sandbox.kubernetes
         self._k8s_namespace = self._k8s_config.namespace
-        KubernetesRuntime._namespace = self._k8s_namespace
+        self._shutdown_listener_id = add_shutdown_listener(
+            lambda: KubernetesRuntime._cleanup_k8s_resources(
+                namespace=self._k8s_namespace,
+                remove_pvc=True,
+                conversation_id=self.sid,
+            )
+        )
 
         # Initialize ports with default values in the required range
         self._container_port = 8080  # Default internal container port
@@ -1902,9 +1901,14 @@ class KubernetesRuntime(ActionExecutionClient):
             try:
                 self._cleanup_k8s_resources(
                     namespace=self._k8s_namespace,
-                    remove_pvc=False,
+                    remove_pvc=True,
                     conversation_id=self.sid,
                 )
+
+                if self._shutdown_listener_id:
+                    remove_shutdown_listener(self._shutdown_listener_id)
+                    self._shutdown_listener_id = None # Clear the ID after removal
+
                 self.log('info', f'Successfully completed delayed cleanup for pod {self.pod_name}')
             except Exception as e:
                 self.log('error', f'Error during delayed cleanup for pod {self.pod_name}: {e}')
