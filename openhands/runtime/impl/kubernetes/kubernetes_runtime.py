@@ -8,7 +8,7 @@ import tenacity
 import time
 import yaml
 from kubernetes import client, config
-from openhands.core.shutdown_manager import remove_shutdown_listener, add_shutdown_listener
+from openhands.utils.shutdown_listener import add_shutdown_listener, remove_shutdown_listener
 from kubernetes.client.models import (
     V1Container,
     V1ContainerPort,

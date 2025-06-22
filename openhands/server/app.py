@@ -32,10 +32,8 @@ from openhands.server.shared import conversation_manager
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    from openhands.core.shutdown_manager import run_shutdown_listeners
     async with conversation_manager:
         yield
-    await run_shutdown_listeners()
 
 
 app = FastAPI(
