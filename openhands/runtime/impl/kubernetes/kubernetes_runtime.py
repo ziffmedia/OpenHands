@@ -1037,14 +1037,14 @@ class KubernetesRuntime(ActionExecutionClient):
             if coordinator and coordinator.enabled:
                 try:
                     pod_name = cls._get_pod_name(conversation_id)
-                    pod_key = f"k8s-pod:{cls._namespace}:{pod_name}"
+                    pod_key = f"k8s-pod:{namespace}:{pod_name}"
                     await coordinator.delete_resource_state(pod_key)
                     logger.debug(f'Cleaned up Redis state for conversation {conversation_id}')
                 except Exception as e:
                     logger.warning(f'Failed to clean up Redis state for conversation {conversation_id}: {e}')
 
             cls._cleanup_k8s_resources(
-                namespace=cls._namespace,
+                namespace=namespace,
                 remove_pvc=True,
                 conversation_id=conversation_id,
             )
